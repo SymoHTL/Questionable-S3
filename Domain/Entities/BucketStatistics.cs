@@ -2,20 +2,20 @@
 
 [Table("BucketStatistics")]
 public class BucketStatistics {
-    public string Name { get; set; } = null!;
-
     /// <summary>
-    /// GUID of the bucket.
+    ///     The number of bytes for all objects in the bucket.
     /// </summary>
-    public string Id { get; set; } = Guid.NewGuid().ToString();
+    public long Bytes = 0;
 
     /// <summary>
-    /// The number of objects in the bucket including all versions.
+    ///     The number of objects in the bucket including all versions.
     /// </summary>
     public long Objects = 0;
 
+    public string Name { get; set; } = null!;
+
     /// <summary>
-    /// The number of bytes for all objects in the bucket.
+    ///     GUID of the bucket.
     /// </summary>
-    public long Bytes = 0;
+    public string Id { get; set; } = Guid.NewGuid().ToString();
 }

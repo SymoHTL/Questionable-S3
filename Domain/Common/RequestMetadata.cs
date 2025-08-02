@@ -1,9 +1,9 @@
 ﻿namespace Domain.Common;
 
 public class RequestMetadata {
-    public User User = null!;
+    public EAuthenticationResult Authentication = EAuthenticationResult.NotAuthenticated;
 
-    public Credential Credential = null!;
+    public EAuthorizationResult Authorization = EAuthorizationResult.NotAuthorized;
 
     public Bucket Bucket = null!;
 
@@ -11,13 +11,12 @@ public class RequestMetadata {
 
     public List<BucketTag> BucketTags = [];
 
+    public Credential Credential = null!;
+
     public DcObject Obj = null!;
 
     public List<ObjectAcl> ObjectAcls = [];
 
     public List<ObjectTag> ObjectTags = [];
-
-    public EAuthenticationResult Authentication = EAuthenticationResult.NotAuthenticated;
-
-    public EAuthorizationResult Authorization = EAuthorizationResult.NotAuthorized;
+    public User User = null!;
 }

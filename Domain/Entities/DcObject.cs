@@ -2,94 +2,93 @@
 
 [Table("DiscordObjects")]
 public class DcObject {
-    
+    /// <summary>
+    ///     Object expiration timestamp.
+    /// </summary>
+    public DateTimeOffset? ExpirationUtc = null;
+
     public List<DcFileChunk> FileChunks { get; set; } = [];
-    
+
     [Key]
     public string Id { get; set; } = Ulid.NewUlid().ToString();
 
     /// <summary>
-    /// GUID of the bucket.
+    ///     GUID of the bucket.
     /// </summary>
     public string BucketId { get; set; } = null!;
 
     /// <summary>
-    /// GUID of the owner.
+    ///     GUID of the owner.
     /// </summary>
     public string OwnerId { get; set; } = null!;
 
     /// <summary>
-    /// GUID of the author.
+    ///     GUID of the author.
     /// </summary>
     public string AuthorId { get; set; } = null!;
 
     /// <summary>
-    /// Object key.
+    ///     Object key.
     /// </summary>
     public string Key { get; set; } = null!;
 
     /// <summary>
-    /// Content type.
+    ///     Content type.
     /// </summary>
     public string ContentType { get; set; } = "application/octet-stream";
 
     /// <summary>
-    /// Content length.
+    ///     Content length.
     /// </summary>
     public long ContentLength { get; set; } = 0;
 
     /// <summary>
-    /// Object version.
+    ///     Object version.
     /// </summary>
     public long Version { get; set; } = 1;
 
     /// <summary>
-    /// ETag of the object.
+    ///     ETag of the object.
     /// </summary>
     public string Etag { get; set; } = null!;
 
     /// <summary>
-    /// Retention type.
+    ///     Retention type.
     /// </summary>
     public ERetentionType Retention { get; set; } = ERetentionType.None;
 
     /// <summary>
-    /// BLOB filename.
+    ///     BLOB filename.
     /// </summary>
     public string BlobFilename { get; set; } = null!;
 
     /// <summary>
-    /// Indicates if the object is a folder, i.e. ends with '/' and has a content length of 0.
+    ///     Indicates if the object is a folder, i.e. ends with '/' and has a content length of 0.
     /// </summary>
     public bool IsFolder { get; set; } = false;
 
     /// <summary>
-    /// Delete marker.
+    ///     Delete marker.
     /// </summary>
     public bool DeleteMarker { get; set; } = false;
 
     /// <summary>
-    /// MD5.
+    ///     MD5.
     /// </summary>
     public string Md5 { get; set; } = null!;
 
     /// <summary>
-    /// Creation timestamp.
+    ///     Creation timestamp.
     /// </summary>
     public DateTimeOffset CreatedUtc { get; set; }
 
     /// <summary>
-    /// Last update timestamp.
+    ///     Last update timestamp.
     /// </summary>
     public DateTimeOffset LastUpdateUtc { get; set; }
 
     /// <summary>
-    /// Last access timestamp.
+    ///     Last access timestamp.
     /// </summary>
     public DateTimeOffset LastAccessUtc { get; set; }
-
-    /// <summary>
-    /// Object expiration timestamp.
-    /// </summary>
-    public DateTimeOffset? ExpirationUtc = null;
 }

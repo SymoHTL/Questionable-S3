@@ -3,9 +3,8 @@
 public static class DatabaseRegistrar {
     public static void AddDatabase(this IServiceCollection services, IConfiguration config) {
         services.AddSqlite<QuestionableDbContext>(config.GetConnectionString("DefaultConnection"),
-            sqliteOptions => {
-                sqliteOptions.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
-            }, options => {
+            sqliteOptions => { sqliteOptions.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery); },
+            options => {
                 options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
                 options.EnableDetailedErrors();
             });

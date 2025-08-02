@@ -1,9 +1,8 @@
 ﻿using Infrastructure.Configuration;
-using S3ServerLibrary;
 
 var builder = CoconaApp.CreateBuilder();
 
-builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+builder.Configuration.AddJsonFile("appsettings.json", false, true);
 builder.Configuration.AddEnvironmentVariables();
 
 builder.Logging.ClearProviders();

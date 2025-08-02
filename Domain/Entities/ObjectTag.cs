@@ -4,7 +4,7 @@
 public class ObjectTag {
     [Key]
     public string Id { get; set; } = Ulid.NewUlid().ToString();
-    
+
     public string BucketId { get; set; } = null!;
 
     public string ObjectId { get; set; } = null!;

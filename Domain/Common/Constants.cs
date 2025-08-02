@@ -2,16 +2,21 @@
 
 public class Constants {
     public static class Headers {
-        public static string RequestType = "X-Request-Type";
-        public static string AuthenticationResult = "X-Authentication-Result";
-        public static string AuthorizedBy = "X-Authorized-By";
+        public const string RequestType = "X-Request-Type";
+        public const string AuthenticationResult = "X-Authentication-Result";
+        public const string AuthorizedBy = "X-Authorized-By";
 
-        public static string DeleteMarker = "X-Amz-Delete-Marker";
-        public static string AccessControlList = "X-Amz-Acl";
-        public static string AclGrantRead = "X-Amz-Grant-Read";
-        public static string AclGrantWrite = "X-Amz-Grant-Write";
-        public static string AclGrantReadAcp = "X-Amz-Grant-Read-Acp";
-        public static string AclGrantWriteAcp = "X-Amz-Grant-Write-Acp";
-        public static string AclGrantFullControl = "X-Amz-Grant-Full-Control";
+        public const string DeleteMarker = "X-Amz-Delete-Marker";
+        public const string AccessControlList = "X-Amz-Acl";
+        public const string AclGrantRead = "X-Amz-Grant-Read";
+        public const string AclGrantWrite = "X-Amz-Grant-Write";
+        public const string AclGrantReadAcp = "X-Amz-Grant-Read-Acp";
+        public const string AclGrantWriteAcp = "X-Amz-Grant-Write-Acp";
+        public const string AclGrantFullControl = "X-Amz-Grant-Full-Control";
+    }
+
+    public static class UserGroups {
+        public const string AllUsers = "AllUsers";
+        public const string AuthenticatedUsers = "AuthenticatedUsers";
     }
 }

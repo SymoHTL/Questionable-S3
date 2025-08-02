@@ -1,0 +1,10 @@
+﻿global using System.Net;
+global using Application.QueryableExtensions;
+global using Application.Services.Interfaces;
+global using Application.Services.S3Handlers.Auth;
+global using Domain;
+global using Domain.Common;
+global using Domain.Entities;
+global using Microsoft.EntityFrameworkCore;
+global using Microsoft.Extensions.Logging;
+global using S3ServerLibrary;

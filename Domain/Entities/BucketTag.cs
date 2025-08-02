@@ -6,22 +6,22 @@ public class BucketTag {
     public string Id { get; set; } = Ulid.NewUlid().ToString();
 
     /// <summary>
-    /// GUID of the bucket.
+    ///     GUID of the bucket.
     /// </summary>
     public string BucketId { get; set; } = null!;
 
     /// <summary>
-    /// Key.
+    ///     Key.
     /// </summary>
     public string Key { get; set; } = null!;
 
     /// <summary>
-    /// Value.
+    ///     Value.
     /// </summary>
     public string Value { get; set; } = null!;
 
     /// <summary>
-    /// Timestamp from record creation, in UTC time.
+    ///     Timestamp from record creation, in UTC time.
     /// </summary>
     public DateTimeOffset CreatedUtc { get; set; }
 }

@@ -1,6 +1,4 @@
-﻿// Global using directives
-
-global using Application.Services.Interfaces;
+﻿global using Application.Services.Interfaces;
 global using Domain.Common;
 global using Domain.Entities;
 global using Microsoft.EntityFrameworkCore;

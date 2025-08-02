@@ -1,17 +1,15 @@
-﻿using System.Net;
-using Infrastructure.S3Handlers.Auth;
+﻿using HttpMethod = WatsonWebserver.Core.HttpMethod;
 
-namespace Infrastructure.S3Handlers.Settings;
+namespace Application.Services.S3Handlers.Settings;
 
-public abstract class S3SettingsHandler {
-    public abstract class HttpRequestHandler;
-
-    private readonly S3AuthHandler _auth;
-    private readonly S3ServerSettings _s3Settings;
+public abstract class S3SettingsHandler : IS3SettingsHandler {
+    private readonly IS3AuthHandler _auth;
     private readonly ILogger<HttpRequestHandler> _httpLogger;
+    private readonly S3ServerSettings _s3Settings;
 
     // ReSharper disable once ContextualLoggerProblem
-    protected S3SettingsHandler(S3ServerSettings s3Settings, ILogger<HttpRequestHandler> httpLogger, S3AuthHandler auth) {
+    protected S3SettingsHandler(S3ServerSettings s3Settings, ILogger<HttpRequestHandler> httpLogger,
+        IS3AuthHandler auth) {
         _s3Settings = s3Settings;
         _httpLogger = httpLogger;
         _auth = auth;
@@ -19,14 +17,11 @@ public abstract class S3SettingsHandler {
 
 
     public async Task<bool> PreRequestHandler(S3Context ctx) {
-        var header = "[" + ctx.Http.Request.Source.IpAddress + ":" + ctx.Http.Request.Source.Port + " " +
-                     ctx.Http.Request.Method + " " + ctx.Http.Request.Url.RawWithoutQuery + "] ";
-
         if (_s3Settings.Logging.HttpRequests && _httpLogger.IsEnabled(LogLevel.Information))
             _httpLogger.LogInformation("Request: {@Request}", ctx.Http.Request);
 
 
-        if (ctx.Http.Request.Url.Elements.Length == 1) {
+        if (ctx.Http.Request.Url.Elements.Length == 1)
             // TODO: favicons, etc.
             if (ctx.Http.Request.Url.Elements[0].Equals("robots.txt")) {
                 ctx.Response.ContentType = "text/plain";
@@ -34,23 +29,19 @@ public abstract class S3SettingsHandler {
                 await ctx.Response.Send("User-Agent: *\r\nDisallow:\r\n");
                 return true;
             }
-        }
 
 
-        if (!ctx.Http.Request.Headers.AllKeys.Contains("Authorization")) {
-            if (ctx.Http.Request.Method == WatsonWebserver.Core.HttpMethod.GET) {
+        if (!ctx.Http.Request.Headers.AllKeys.Contains("Authorization"))
+            if (ctx.Http.Request.Method == HttpMethod.GET)
                 if (ctx.Http.Request.Url.Elements == null || ctx.Http.Request.Url.Elements.Length < 1) {
                     ctx.Response.StatusCode = 200;
                     ctx.Response.ContentType = "text/html";
                     await ctx.Response.Send(DefaultPage("https://github.com/jchristn/less3"));
                     return true;
                 }
-            }
-        }
 
 
-
-        RequestMetadata md = _auth.AuthenticateAndBuildMetadata(ctx);
+        var md = await _auth.AuthenticateAndBuildMetadataAsync(ctx);
 
         switch (ctx.Request.RequestType) {
             case S3RequestType.ListBuckets:
@@ -100,17 +91,24 @@ public abstract class S3SettingsHandler {
         ctx.Metadata = md;
 
 
-        if (ctx.Http.Request.Query.Elements is not null && ctx.Http.Request.Query.Elements.AllKeys.Contains("metadata")) {
+        if (ctx.Http.Request.Query.Elements is not null &&
+            ctx.Http.Request.Query.Elements.AllKeys.Contains("metadata")) {
             ctx.Response.ContentType = "application/json";
-            await ctx.Response.Send(SerializationHelper.SerializeJson(md, true));
+            await ctx.Response.Send(SerializationHelper.SerializeJson(md));
             return true;
         }
 
         return false;
     }
 
+    public Task PostRequestHandler(S3Context arg) {
+    }
+
+    public Task DefaultRequestHandler(S3Context arg) {
+    }
+
     private static string DefaultPage(string link) {
-        string html =
+        var html =
             "<html>" + Environment.NewLine +
             "   <head>" + Environment.NewLine +
             "      <title>&lt;3 :: Less3 :: S3-Compatible Object Storage</title>" + Environment.NewLine +
@@ -163,7 +161,7 @@ public abstract class S3SettingsHandler {
         // http://loveascii.com/hearts.html
         // http://patorjk.com/software/taag/#p=display&f=Small&t=less3 
 
-        string ret = Environment.NewLine;
+        var ret = Environment.NewLine;
         ret +=
             "  ,d88b.d88b,  " + @"  _           ____  " + Environment.NewLine +
             "  88888888888  " + @" | |___ _____|__ /  " + Environment.NewLine +
@@ -174,11 +172,5 @@ public abstract class S3SettingsHandler {
         return ret;
     }
 
-    public Task PostRequestHandler(S3Context arg) {
-        throw new NotImplementedException();
-    }
-
-    public Task DefaultRequestHandler(S3Context arg) {
-        throw new NotImplementedException();
-    }
+    public abstract class HttpRequestHandler;
 }

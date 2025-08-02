@@ -1,4 +1,4 @@
-﻿using Infrastructure.S3Handlers.Settings;
+﻿using Application.Services.S3Handlers.Settings;
 
 namespace Infrastructure.Configuration;
 
