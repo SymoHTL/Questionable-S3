@@ -1,4 +1,5 @@
-﻿using HttpMethod = WatsonWebserver.Core.HttpMethod;
+﻿using S3ServerLibrary.S3Objects;
+using HttpMethod = WatsonWebserver.Core.HttpMethod;
 
 namespace Application.Services.S3Handlers.Settings;
 
@@ -101,10 +102,16 @@ public abstract class S3SettingsHandler : IS3SettingsHandler {
         return false;
     }
 
-    public Task PostRequestHandler(S3Context arg) {
+    public Task PostRequestHandler(S3Context ctx) {
+        if (_s3Settings.Logging.HttpRequests && _httpLogger.IsEnabled(LogLevel.Information))
+            _httpLogger.LogInformation("Response: {@Response}", ctx.Response);
+        return Task.CompletedTask;
     }
 
-    public Task DefaultRequestHandler(S3Context arg) {
+    public async Task DefaultRequestHandler(S3Context ctx) {
+        if (_httpLogger.IsEnabled(LogLevel.Information))
+            _httpLogger.LogInformation("Default request handler invoked for {@Request}", ctx.Http.Request);
+        await ctx.Response.Send(ErrorCode.InvalidRequest);
     }
 
     private static string DefaultPage(string link) {
