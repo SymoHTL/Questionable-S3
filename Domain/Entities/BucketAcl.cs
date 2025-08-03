@@ -8,7 +8,7 @@ public class BucketAcl {
     /// <summary>
     ///     User group.
     /// </summary>
-    public string UserGroup { get; set; } = null!;
+    public string? UserGroup { get; set; } = null!;
 
     /// <summary>
     ///     Bucket GUID.
@@ -18,7 +18,7 @@ public class BucketAcl {
     /// <summary>
     ///     User GUID.
     /// </summary>
-    public string UserId { get; set; } = null!;
+    public string? UserId { get; set; } = null!;
 
     /// <summary>
     ///     GUID of the issuing user.

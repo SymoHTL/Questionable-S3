@@ -13,7 +13,7 @@ public class Credential {
     /// <summary>
     ///     Description.
     /// </summary>
-    public string Description { get; set; } = null!;
+    public string? Description { get; set; }
 
     /// <summary>
     ///     Access key.

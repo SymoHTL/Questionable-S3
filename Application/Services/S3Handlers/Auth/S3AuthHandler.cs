@@ -27,7 +27,7 @@ public class S3AuthHandler : IS3AuthHandler {
             else {
                 md.Credential = cred;
 
-                var user = await _dbContext.Users.ReadUserById(cred.UserId);
+                var user = await _dbContext.Users.ReadUserByIdAsync(cred.UserId);
                 if (user is null) {
                     md.Authentication = EAuthenticationResult.UserNotFound;
                 }
@@ -54,13 +54,13 @@ public class S3AuthHandler : IS3AuthHandler {
 
         if (md.Bucket is not null && ctx.Request.IsObjectRequest && !string.IsNullOrEmpty(ctx.Request.Key)) {
             if (string.IsNullOrEmpty(ctx.Request.VersionId)) {
-                md.Obj = await _dbContext.DcObjects.ReadObjectLatestMetadataAsync(md.Bucket.Id, ctx.Request.Key);
+                md.Obj = await _dbContext.Objects.ReadObjectLatestMetadataAsync(md.Bucket.Id, ctx.Request.Key);
             }
             else {
                 long versionId = 1;
                 if (!string.IsNullOrEmpty(ctx.Request.VersionId)) long.TryParse(ctx.Request.VersionId, out versionId);
 
-                md.Obj = await _dbContext.DcObjects.ReadObjectByKeyAndVersionAsync(ctx.Request.Key, versionId);
+                md.Obj = await _dbContext.Objects.ReadObjectByKeyAndVersionAsync(md.Bucket.Id,ctx.Request.Key, versionId);
             }
 
             if (md.Obj != null) {

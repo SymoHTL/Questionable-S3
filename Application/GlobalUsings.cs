@@ -2,9 +2,11 @@
 global using Application.QueryableExtensions;
 global using Application.Services.Interfaces;
 global using Application.Services.S3Handlers.Auth;
+global using Application.Services.S3Handlers.Helpers;
 global using Domain;
 global using Domain.Common;
 global using Domain.Entities;
 global using Microsoft.EntityFrameworkCore;
 global using Microsoft.Extensions.Logging;
 global using S3ServerLibrary;
+global using Object = Domain.Entities.Object;

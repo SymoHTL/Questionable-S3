@@ -1,13 +1,13 @@
 ﻿namespace Domain.Entities;
 
 [Table("DiscordObjects")]
-public class DcObject {
+public class Object {
     /// <summary>
     ///     Object expiration timestamp.
     /// </summary>
     public DateTimeOffset? ExpirationUtc = null;
 
-    public List<DcFileChunk> FileChunks { get; set; } = [];
+    public List<ObjectChunk> FileChunks { get; set; } = [];
 
     [Key]
     public string Id { get; set; } = Ulid.NewUlid().ToString();

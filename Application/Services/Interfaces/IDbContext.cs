@@ -6,8 +6,9 @@ public interface IDbContext {
     DbSet<Bucket> Buckets { get; }
     DbSet<BucketAcl> BucketAcls { get; }
     DbSet<BucketTag> BucketTags { get; }
-    DbSet<DcObject> DcObjects { get; }
+    DbSet<Object> Objects { get; }
     DbSet<ObjectAcl> ObjectAcls { get; }
     DbSet<ObjectTag> ObjectTags { get; }
+    DbSet<ObjectChunk> ObjectChunks { get; set; }
     public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

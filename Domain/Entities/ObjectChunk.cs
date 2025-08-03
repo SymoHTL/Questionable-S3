@@ -1,7 +1,7 @@
 ﻿namespace Domain.Entities;
 
 [Table("Chunks")]
-public class DcFileChunk {
+public class ObjectChunk {
     [Key]
     public ulong AttachmentId { get; set; }
 
@@ -16,11 +16,11 @@ public class DcFileChunk {
     [DataType(DataType.DateTime)]
     public DateTimeOffset ExpireAt { get; set; }
 
-    public string FileId { get; set; } = null!;
+    public string ObjectId { get; set; } = null!;
 
-    [ForeignKey(nameof(FileId))]
-    public DcObject DcObject { get; set; } = null!;
+    [ForeignKey(nameof(ObjectId))]
+    public Object Object { get; set; } = null!;
 
     [NotMapped]
-    public static TimeSpan ExpireAfter { get; } = TimeSpan.FromHours(23).Add(TimeSpan.FromMinutes(55));
+    public static TimeSpan ExpireAfter { get; } = TimeSpan.FromHours(23);
 }

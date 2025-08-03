@@ -19,4 +19,18 @@ public class Constants {
         public const string AllUsers = "AllUsers";
         public const string AuthenticatedUsers = "AuthenticatedUsers";
     }
+    
+    public static class File {
+        public const string TempDir = "temp";
+    }
+    
+    public static class HttpClients {
+        public const string Discord = "Discord";
+    }
+
+    public class RecurringJobs {
+        public static string FormatObjectRefresh(ulong messageId) {
+            return $"RefreshDiscordMessage-{messageId}";
+        }
+    }
 }

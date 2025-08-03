@@ -1,4 +1,6 @@
-﻿namespace Domain.Common;
+﻿using Object = Domain.Entities.Object;
+
+namespace Domain.Common;
 
 public class RequestMetadata {
     public EAuthenticationResult Authentication = EAuthenticationResult.NotAuthenticated;
@@ -13,7 +15,7 @@ public class RequestMetadata {
 
     public Credential Credential = null!;
 
-    public DcObject Obj = null!;
+    public Object Obj = null!;
 
     public List<ObjectAcl> ObjectAcls = [];
 

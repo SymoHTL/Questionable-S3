@@ -5,9 +5,9 @@ public class ObjectAcl {
     [Key]
     public string Id { get; set; } = Ulid.NewUlid().ToString();
 
-    public string UserGroup { get; set; } = null!;
+    public string? UserGroup { get; set; } = null!;
 
-    public string UserId { get; set; } = null!;
+    public string? UserId { get; set; } = null!;
 
     public string IssuedByUserId { get; set; } = null!;
 
