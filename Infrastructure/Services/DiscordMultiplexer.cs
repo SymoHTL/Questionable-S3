@@ -13,12 +13,14 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
     private readonly ILogger<DiscordMultiplexer> _logger;
     private readonly IServiceProvider _serviceProvider;
     private readonly TimeProvider _timeProvider;
+    private readonly IStorageMetrics _metrics;
     private volatile bool _isReady;
 
-    public DiscordMultiplexer(IConfiguration configuration, ILogger<DiscordMultiplexer> logger, IServiceProvider serviceProvider, TimeProvider timeProvider) {
+    public DiscordMultiplexer(IConfiguration configuration, ILogger<DiscordMultiplexer> logger, IServiceProvider serviceProvider, TimeProvider timeProvider, IStorageMetrics metrics) {
         _logger = logger;
         _serviceProvider = serviceProvider;
         _timeProvider = timeProvider;
+        _metrics = metrics;
         _tokens = configuration.GetSection("Discord:Tokens").Get<string[]>()
                   ?? throw new InvalidOperationException("Discord tokens are not configured.");
         if (_tokens.Length == 0)
@@ -78,8 +80,9 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
     }
 
     public async Task<IMessageChannel> GetChannelAsync(ulong channelId) {
-        var channel = await _discordClients[Random.Shared.Next(_discordClients.Length)]
-            .GetChannelAsync(channelId);
+        var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
+        _metrics.RecordDiscordRequest();
+        var channel = await client.GetChannelAsync(channelId);
         if (channel is not IMessageChannel msgChannel)
             throw new InvalidOperationException($"Channel with ID {channelId} is not a message channel.");
         return msgChannel;
@@ -93,6 +96,7 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
                     ?? client.GetGuild(_guildId) ??
                     throw new InvalidOperationException($"Guild with ID {_guildId} not found");
 
+        _metrics.RecordDiscordRequest();
         var channel = await guild.CreateTextChannelAsync(channelName);
         return channel.Id;
     }
@@ -101,16 +105,20 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
         var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
 
         try {
+            _metrics.RecordDiscordRequest();
             var channel = await client.GetChannelAsync(channelId);
 
             switch (channel) {
                 case SocketGuildChannel socketChannel:
+                    _metrics.RecordDiscordRequest();
                     await socketChannel.DeleteAsync();
                     return;
                 case RestGuildChannel restChannel:
+                    _metrics.RecordDiscordRequest();
                     await restChannel.DeleteAsync();
                     return;
                 case IGuildChannel guildChannelObj:
+                    _metrics.RecordDiscordRequest();
                     await guildChannelObj.DeleteAsync();
                     return;
             }
@@ -123,6 +131,7 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
 
             var guildChannel = guild.GetChannel(channelId);
             if (guildChannel is not null) {
+                _metrics.RecordDiscordRequest();
                 await guildChannel.DeleteAsync();
                 return;
             }
@@ -141,14 +150,17 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
             ["DiscordMessageId"] = messageId
         });
 
+        _metrics.RecordDiscordRefreshRequest();
         try {
             var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
+            _metrics.RecordDiscordRequest();
             var channel = await client.GetChannelAsync(channelId) as IMessageChannel;
             if (channel is null) {
                 _logger.LogWarning("Channel with ID {ChannelId} not found for message refresh", channelId);
                 return;
             }
 
+            _metrics.RecordDiscordRequest();
             var message = await channel.GetMessageAsync(messageId, options: new RequestOptions { CancelToken = ct });
             if (message is null) {
                 _logger.LogWarning("Message with ID {MessageId} not found in channel {ChannelId}", messageId, channelId);
@@ -198,13 +210,17 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
         if (ids.Length == 0) return;
 
         var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
-        var messageChannel = await client.GetChannelAsync(channel) as IMessageChannel;
+    _metrics.RecordDiscordRequest();
+    var messageChannel = await client.GetChannelAsync(channel) as IMessageChannel;
         if (messageChannel is null) {
             _logger.LogWarning("Channel with ID {ChannelId} not found for bulk delete", channel);
             return;
         }
 
-        foreach (var id in ids) await messageChannel.DeleteMessageAsync(id, options: new RequestOptions { CancelToken = ct, RetryMode = RetryMode.AlwaysRetry});
+        foreach (var id in ids) {
+            _metrics.RecordDiscordRequest();
+            await messageChannel.DeleteMessageAsync(id, options: new RequestOptions { CancelToken = ct, RetryMode = RetryMode.AlwaysRetry});
+        }
     }
 
     public async ValueTask DisposeAsync() {

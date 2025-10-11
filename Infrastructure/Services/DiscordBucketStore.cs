@@ -22,16 +22,18 @@ public class DiscordBucketStore : IBucketStore {
     private readonly IRecurringJobManagerV2 _recurringJobs;
     private readonly IBackgroundJobClientV2 _jobs;
     private readonly ILogger<DiscordBucketStore> _logger;
+    private readonly IStorageMetrics _metrics;
 
     public DiscordBucketStore(TimeProvider timeProvider, IDbContext db, DiscordMultiplexer dcMultiplexer,
         IHttpClientFactory httpClientFactory, IRecurringJobManagerV2 recurringJobs, IBackgroundJobClientV2 jobs,
-        ILogger<DiscordBucketStore> logger) {
+        ILogger<DiscordBucketStore> logger, IStorageMetrics metrics) {
         _timeProvider = timeProvider;
         _db = db;
         _dcMultiplexer = dcMultiplexer;
         _recurringJobs = recurringJobs;
         _jobs = jobs;
         _logger = logger;
+        _metrics = metrics;
         _httpClient = httpClientFactory.CreateClient(Constants.HttpClients.Discord);
     }
 
@@ -68,6 +70,10 @@ public class DiscordBucketStore : IBucketStore {
         }
 
         await _db.SaveChangesAsync(ct);
+
+        _metrics.RecordIngress(obj.ContentLength);
+        _metrics.TrackObjectStored(storageLength);
+
         return true;
     }
 
@@ -96,10 +102,16 @@ public class DiscordBucketStore : IBucketStore {
 
         var messageIds = objectChunks.Select(c => c.MessageId).Distinct().ToArray();
 
+        var storedBytes = trackedObject.StorageContentLength > 0
+            ? trackedObject.StorageContentLength
+            : trackedObject.ContentLength;
+
         _db.Objects.Remove(trackedObject);
         await _db.SaveChangesAsync(ct);
 
         _jobs.Create<DiscordMultiplexer>(dc => dc.BulkDeleteAsync(messageIds, channelId, ct), new EnqueuedState());
+
+        _metrics.TrackObjectDeleted(storedBytes);
     }
 
     public async Task<Stream> GetObjectStreamAsync(Bucket bucket, Object obj, long startByte, long endByte,
@@ -108,6 +120,10 @@ public class DiscordBucketStore : IBucketStore {
         if (obj.FileChunks.Count == 0) throw new InvalidOperationException("Object has no chunks associated with it.");
 
         var stream = new MemoryStream();
+        var expectedLength = Math.Max(0, endByte - startByte + 1);
+        if (expectedLength > 0) {
+            _metrics.RecordEgress(expectedLength);
+        }
         foreach (var chunk in obj.FileChunks) {
             var adjustedStart = Math.Max(startByte, chunk.StartByte) - chunk.StartByte;
             var adjustedEnd = Math.Min(endByte, chunk.EndByte) - chunk.StartByte;
@@ -131,6 +147,7 @@ public class DiscordBucketStore : IBucketStore {
             try {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
                 request.Headers.Range = new RangeHeaderValue(startByte, endByte);
+                _metrics.RecordDiscordRequest();
                 using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
                 response.EnsureSuccessStatusCode();
 
@@ -201,10 +218,13 @@ public class DiscordBucketStore : IBucketStore {
                 GetChunkFileName(obj, c.Index))).ToArray();
         try {
             return await ExecuteWithRetryAsync(
-                () => channel.SendFilesAsync(attachments, options: new RequestOptions {
-                    CancelToken = ct,
-                    RetryMode = RetryMode.AlwaysRetry
-                }),
+                async () => {
+                    _metrics.RecordDiscordRequest();
+                    return await channel.SendFilesAsync(attachments, options: new RequestOptions {
+                        CancelToken = ct,
+                        RetryMode = RetryMode.AlwaysRetry
+                    });
+                },
                 "upload chunk group",
                 ct);
         }

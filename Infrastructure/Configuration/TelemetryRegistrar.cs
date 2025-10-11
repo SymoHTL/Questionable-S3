@@ -38,6 +38,7 @@ public static class TelemetryRegistrar {
                 metrics.AddProcessInstrumentation();
 
                 metrics.AddMeter("System.Net.Http");
+                metrics.AddMeter(StorageMetrics.MeterName);
                 metrics.AddView("http.server.request.duration",
                     new ExplicitBucketHistogramConfiguration {
                         Boundaries = [

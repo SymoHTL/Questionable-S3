@@ -8,13 +8,15 @@ public class S3BucketHandler : IS3BucketHandler {
     private readonly TimeProvider _tp;
     private readonly IDiscordService _discordService;
     private readonly IDbContext _db;
+    private readonly IStorageMetrics _metrics;
 
     public S3BucketHandler(ILogger<S3BucketHandler> logger, TimeProvider tp, IDiscordService discordService,
-        IDbContext db) {
+        IDbContext db, IStorageMetrics metrics) {
         _logger = logger;
         _tp = tp;
         _discordService = discordService;
         _db = db;
+        _metrics = metrics;
     }
 
     public async Task Write(S3Context ctx) {
@@ -50,7 +52,8 @@ public class S3BucketHandler : IS3BucketHandler {
         bucket.ChannelId = await _discordService.CreateChannelAsync(bucket.Name);
 
         _db.Buckets.Add(bucket);
-        await _db.SaveChangesAsync();
+    await _db.SaveChangesAsync();
+    _metrics.TrackBucketCreated();
 
         List<Grant> grants = await Grants.GrantsFromHeaders(_db, md.User, ctx.Http.Request.Headers);
         if (grants is { Count: > 0 }) {
@@ -251,8 +254,9 @@ public class S3BucketHandler : IS3BucketHandler {
         if (bucketTags.Count > 0)
             _db.BucketTags.RemoveRange(bucketTags);
 
-        _db.Buckets.Remove(bucket);
-        await _db.SaveChangesAsync(cancellation);
+    _db.Buckets.Remove(bucket);
+    await _db.SaveChangesAsync(cancellation);
+    _metrics.TrackBucketDeleted();
     }
 
     public async Task<ListBucketResult> Read(S3Context ctx) {

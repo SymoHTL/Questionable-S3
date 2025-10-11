@@ -6,6 +6,7 @@ global using Application.Services.S3Handlers.Settings;
 global using Domain.Common;
 global using Domain.Entities;
 global using Infrastructure.Services;
+global using Infrastructure.Telemetry;
 global using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 global using Microsoft.EntityFrameworkCore;
 global using Microsoft.Extensions.Configuration;
