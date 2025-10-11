@@ -7,6 +7,8 @@ public static class S3HandlerRegistrar {
         services.AddSingleton<IS3ObjectHandler, S3ObjectHandler>();
         services.AddSingleton<IS3BucketHandler, S3BucketHandler>();
         services.AddSingleton<IBucketStore, DiscordBucketStore>();
+        services.AddSingleton<IHealthStatusService, HealthStatusService>();
+        services.AddSingleton<IObjectEncryptionService, ObjectEncryptionService>();
 
         services.AddSingleton(TimeProvider.System);
     }

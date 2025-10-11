@@ -43,6 +43,11 @@ public class Object {
     public long ContentLength { get; set; } = 0;
 
     /// <summary>
+    ///     Physical storage content length after transformations such as encryption.
+    /// </summary>
+    public long StorageContentLength { get; set; } = 0;
+
+    /// <summary>
     ///     Object version.
     /// </summary>
     public long Version { get; set; } = 1;
@@ -76,6 +81,36 @@ public class Object {
     ///     MD5.
     /// </summary>
     public string Md5 { get; set; } = null!;
+
+    /// <summary>
+    ///     Indicates whether the object payload is encrypted at rest.
+    /// </summary>
+    public bool IsEncrypted { get; set; } = false;
+
+    /// <summary>
+    ///     Algorithm identifier (e.g. AES256, aws:kms).
+    /// </summary>
+    public string? EncryptionAlgorithm { get; set; }
+
+    /// <summary>
+    ///     Identifier of the master key used to protect the data key.
+    /// </summary>
+    public string? EncryptionKeyId { get; set; }
+
+    /// <summary>
+    ///     Serialized encryption metadata (chunk layout, nonces, tags, etc.).
+    /// </summary>
+    public string? EncryptionMetadata { get; set; }
+
+    /// <summary>
+    ///     Protected envelope data key (DPAPI/DataProtection payload).
+    /// </summary>
+    public byte[]? EncryptedDataKey { get; set; }
+
+    /// <summary>
+    ///     Optional encryption context provided by the client.
+    /// </summary>
+    public string? EncryptionContext { get; set; }
 
     /// <summary>
     ///     Creation timestamp.

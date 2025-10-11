@@ -33,5 +33,10 @@ public class MultipartUpload {
     public DateTimeOffset LastUpdatedUtc { get; set; }
     public bool IsAborted { get; set; } = false;
 
+    public bool UseServerSideEncryption { get; set; } = false;
+    public string? EncryptionAlgorithm { get; set; }
+    public string? EncryptionKeyId { get; set; }
+    public string? EncryptionContext { get; set; }
+
     public List<MultipartUploadPart> Parts { get; set; } = [];
 }

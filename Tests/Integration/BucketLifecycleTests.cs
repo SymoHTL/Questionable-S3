@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
 using System.Threading.Tasks;
 using Amazon.S3.Model;
 using Amazon.S3.Util;
@@ -42,5 +45,37 @@ public class BucketLifecycleTests : S3IntegrationTestBase
 
         var exists = await AmazonS3Util.DoesS3BucketExistV2Async(Client, bucketName);
         Assert.That(exists, Is.False);
+    }
+
+    [Test]
+    public async Task BucketTags_PersistAcrossRequests()
+    {
+        await using var bucket = await CreateEphemeralBucketAsync();
+        var tags = new List<Tag>
+        {
+            new() { Key = "env", Value = "integration" },
+            new() { Key = "team", Value = "storage" }
+        };
+
+        var putResponse = await Client.PutBucketTaggingAsync(new PutBucketTaggingRequest
+        {
+            BucketName = bucket.Name,
+            TagSet = tags
+        });
+
+        Assert.That(putResponse.HttpStatusCode, Is.EqualTo(HttpStatusCode.NoContent).Or.EqualTo(HttpStatusCode.OK));
+
+        var getResponse = await Client.GetBucketTaggingAsync(new GetBucketTaggingRequest
+        {
+            BucketName = bucket.Name
+        });
+
+        Assert.That(getResponse.HttpStatusCode, Is.EqualTo(HttpStatusCode.OK));
+        Assert.That(getResponse.TagSet.Count, Is.EqualTo(tags.Count));
+        foreach (var tag in tags)
+        {
+            Assert.That(getResponse.TagSet.Any(t => t.Key == tag.Key && t.Value == tag.Value), Is.True,
+                $"Tag {tag.Key} missing or mismatched");
+        }
     }
 }

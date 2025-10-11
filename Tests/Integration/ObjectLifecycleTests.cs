@@ -1,27 +1,25 @@
-using System;
-using System.IO;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
+using Amazon.S3;
 using Amazon.S3.Model;
-using NUnit.Framework;
+using Amazon.Runtime;
 using Tests.Infrastructure;
 
 namespace Tests.Integration;
 
-public class ObjectLifecycleTests : S3IntegrationTestBase
-{
+public class ObjectLifecycleTests : S3IntegrationTestBase {
     private const int LargeObjectSizeBytes = 5 * 1024 * 1024; // 5 MB keeps runtime reasonable
 
     [Test]
-    public async Task PutAndGetObject_RoundTripsUtf8Payload()
-    {
-        await using var bucket = await CreateEphemeralBucketAsync();
+    public async Task PutAndGetObject_RoundTripsUtf8Payload() {
+        var bucket = await CreateEphemeralBucketAsync();
         var key = bucket.TrackKey($"object-{Guid.NewGuid():N}.txt");
         const string payload = "Hello, Questionable S3!";
 
-        await Client.PutObjectAsync(new PutObjectRequest
-        {
+        await Client.PutObjectAsync(new PutObjectRequest {
             BucketName = bucket.Name,
             Key = key,
             ContentType = "text/plain",
@@ -38,14 +36,12 @@ public class ObjectLifecycleTests : S3IntegrationTestBase
     }
 
     [Test]
-    public async Task DeleteObject_RemovesStoredContent()
-    {
+    public async Task DeleteObject_RemovesStoredContent() {
         await using var bucket = await CreateEphemeralBucketAsync();
         var key = bucket.TrackKey($"object-{Guid.NewGuid():N}.txt");
         const string payload = "Payload scheduled for deletion";
 
-        await Client.PutObjectAsync(new PutObjectRequest
-        {
+        await Client.PutObjectAsync(new PutObjectRequest {
             BucketName = bucket.Name,
             Key = key,
             ContentType = "text/plain",
@@ -62,8 +58,7 @@ public class ObjectLifecycleTests : S3IntegrationTestBase
     }
 
     [Test]
-    public async Task PutAndGetLargeObject_PreservesContent()
-    {
+    public async Task PutAndGetLargeObject_PreservesContent() {
         await using var bucket = await CreateEphemeralBucketAsync();
         var key = bucket.TrackKey($"large-object-{Guid.NewGuid():N}.bin");
 
@@ -71,10 +66,8 @@ public class ObjectLifecycleTests : S3IntegrationTestBase
         RandomNumberGenerator.Fill(buffer);
         var originalHash = MD5.HashData(buffer);
 
-        await using (var uploadStream = new MemoryStream(buffer, writable: false))
-        {
-            await Client.PutObjectAsync(new PutObjectRequest
-            {
+        await using (var uploadStream = new MemoryStream(buffer, writable: false)) {
+            await Client.PutObjectAsync(new PutObjectRequest {
                 BucketName = bucket.Name,
                 Key = key,
                 InputStream = uploadStream,
@@ -92,5 +85,149 @@ public class ObjectLifecycleTests : S3IntegrationTestBase
         Assert.That(getResponse.HttpStatusCode, Is.EqualTo(System.Net.HttpStatusCode.OK));
         Assert.That(downloadedBytes.Length, Is.EqualTo(LargeObjectSizeBytes));
         Assert.That(downloadedHash, Is.EqualTo(originalHash));
+    }
+
+    [Test]
+    public async Task PutObject_WithSseS3_DecryptsOnRead() {
+        const string payload = "Encrypted payload sample";
+
+        await using var bucket = await CreateEphemeralBucketAsync();
+        var key = bucket.TrackKey($"sse-object-{Guid.NewGuid():N}.txt");
+
+        var putResponse = await Client.PutObjectAsync(new PutObjectRequest {
+            BucketName = bucket.Name,
+            Key = key,
+            ContentBody = payload,
+            ContentType = "text/plain",
+            ServerSideEncryptionMethod = ServerSideEncryptionMethod.AES256
+        });
+
+        Assert.That(putResponse.HttpStatusCode, Is.EqualTo(System.Net.HttpStatusCode.OK));
+        Assert.That(putResponse.ServerSideEncryptionMethod, Is.EqualTo(ServerSideEncryptionMethod.AES256));
+
+        using var getResponse = await Client.GetObjectAsync(bucket.Name, key);
+        using var reader = new StreamReader(getResponse.ResponseStream, Encoding.UTF8);
+        var roundTripped = await reader.ReadToEndAsync();
+
+        Assert.That(getResponse.ServerSideEncryptionMethod, Is.EqualTo(ServerSideEncryptionMethod.AES256));
+        Assert.That(roundTripped, Is.EqualTo(payload));
+    }
+
+    [Test]
+    public async Task GetObject_WithInvalidCredentials_IsDenied() {
+        await using var bucket = await CreateEphemeralBucketAsync();
+        var key = bucket.TrackKey($"secured-object-{Guid.NewGuid():N}.txt");
+
+        await Client.PutObjectAsync(new PutObjectRequest {
+            BucketName = bucket.Name,
+            Key = key,
+            ContentBody = "Access controlled content",
+            ContentType = "text/plain"
+        });
+
+        using var rogueClient = new AmazonS3Client(
+            new BasicAWSCredentials("invalid-ak", "invalid-sk"),
+            Options.CreateClientConfig());
+
+        var ex = Assert.ThrowsAsync<AmazonS3Exception>(() => rogueClient.GetObjectAsync(bucket.Name, key));
+        Assert.That(ex?.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden).Or.EqualTo(HttpStatusCode.Unauthorized));
+        Assert.That(ex?.ErrorCode, Is.EqualTo("AccessDenied"));
+    }
+
+    [Test]
+    public async Task MultipartUpload_CompletesAndIsReadable() {
+        const int partSize = 5 * 1024 * 1024;
+        const int partCount = 2;
+
+        await using var bucket = await CreateEphemeralBucketAsync();
+        var key = bucket.TrackKey($"multipart-object-{Guid.NewGuid():N}.bin");
+
+        var initResponse = await Client.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest {
+            BucketName = bucket.Name,
+            Key = key,
+            ContentType = "application/octet-stream"
+        });
+
+        using var dataBuffer = new MemoryStream(partSize * partCount);
+        var partEtags = new List<PartETag>(partCount);
+
+        try {
+            for (var partNumber = 1; partNumber <= partCount; partNumber++) {
+                var buffer = new byte[partSize];
+                RandomNumberGenerator.Fill(buffer);
+                dataBuffer.Write(buffer, 0, buffer.Length);
+
+                await using var partStream = new MemoryStream(buffer, writable: false);
+                var uploadResponse = await Client.UploadPartAsync(new UploadPartRequest {
+                    BucketName = bucket.Name,
+                    Key = key,
+                    UploadId = initResponse.UploadId,
+                    PartNumber = partNumber,
+                    PartSize = buffer.Length,
+                    InputStream = partStream
+                });
+
+                partEtags.Add(new PartETag(partNumber, uploadResponse.ETag));
+            }
+
+            await Client.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest {
+                BucketName = bucket.Name,
+                Key = key,
+                UploadId = initResponse.UploadId,
+                PartETags = partEtags
+            });
+        }
+        catch {
+            await Client.AbortMultipartUploadAsync(new AbortMultipartUploadRequest {
+                BucketName = bucket.Name,
+                Key = key,
+                UploadId = initResponse.UploadId
+            });
+            throw;
+        }
+
+        var expectedBytes = dataBuffer.ToArray();
+        using var completedObject = await Client.GetObjectAsync(bucket.Name, key);
+        await using var downloaded = new MemoryStream();
+        await completedObject.ResponseStream.CopyToAsync(downloaded);
+
+        Assert.That(completedObject.HttpStatusCode, Is.EqualTo(HttpStatusCode.OK));
+        Assert.That(downloaded.ToArray(), Is.EqualTo(expectedBytes));
+    }
+
+    [Test]
+    public async Task ObjectTags_PersistAcrossRequests() {
+        await using var bucket = await CreateEphemeralBucketAsync();
+        var key = bucket.TrackKey($"tagged-object-{Guid.NewGuid():N}.txt");
+
+        await Client.PutObjectAsync(new PutObjectRequest {
+            BucketName = bucket.Name,
+            Key = key,
+            ContentBody = "Tagged content",
+            ContentType = "text/plain"
+        });
+
+        var expectedTags = new List<Tag> {
+            new() {Key = "env", Value = "integration"},
+            new() {Key = "feature", Value = "tags"}
+        };
+
+        await Client.PutObjectTaggingAsync(new PutObjectTaggingRequest {
+            BucketName = bucket.Name,
+            Key = key,
+            Tagging = new Tagging {TagSet = expectedTags}
+        });
+
+        var tagResponse = await Client.GetObjectTaggingAsync(new GetObjectTaggingRequest {
+            BucketName = bucket.Name,
+            Key = key
+        });
+
+        Assert.That(tagResponse.HttpStatusCode, Is.EqualTo(HttpStatusCode.OK));
+        Assert.That(tagResponse.Tagging.Count, Is.EqualTo(expectedTags.Count));
+        foreach (var tag in expectedTags) {
+            Assert.That(tagResponse.Tagging.Any(t => t.Key == tag.Key && t.Value == tag.Value), Is.True,
+                $"Tag {tag.Key} missing or mismatched");
+        }
     }
 }

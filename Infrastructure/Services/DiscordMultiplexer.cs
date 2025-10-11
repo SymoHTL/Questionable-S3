@@ -1,4 +1,5 @@
-﻿using Discord;
+﻿using System.Collections.Generic;
+using Discord;
 using Discord.Rest;
 using Discord.WebSocket;
 using Infrastructure.Extensions;
@@ -12,6 +13,7 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
     private readonly ILogger<DiscordMultiplexer> _logger;
     private readonly IServiceProvider _serviceProvider;
     private readonly TimeProvider _timeProvider;
+    private volatile bool _isReady;
 
     public DiscordMultiplexer(IConfiguration configuration, ILogger<DiscordMultiplexer> logger, IServiceProvider serviceProvider, TimeProvider timeProvider) {
         _logger = logger;
@@ -39,6 +41,8 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
     }
 
     public async Task StartAsync() {
+        _isReady = false;
+
         for (var i = 0; i < _tokens.Length; i++) {
             await _discordClients[i].LoginAsync(TokenType.Bot, _tokens[i]);
             await _discordClients[i].StartAsync();
@@ -47,6 +51,8 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
             _logger.LogInformation("Discord client {Name} started", _discordClients[i].CurrentUser.Username);
             _discordClients[i].Log += LogMessage;
         }
+
+        _isReady = true;
     }
 
     private void HasGuild(DiscordSocketClient client) {
@@ -130,44 +136,62 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
     }
 
     public async Task RefreshObjectMessageAsync(ulong messageId, ulong channelId, CancellationToken ct) {
-        var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
-        var channel = await client.GetChannelAsync(channelId) as IMessageChannel;
-        if (channel is null) {
-            _logger.LogWarning("Channel with ID {ChannelId} not found for message refresh",
-                channelId);
-            return;
-        }
+        using var logScope = _logger.BeginScope(new Dictionary<string, object> {
+            ["DiscordChannelId"] = channelId,
+            ["DiscordMessageId"] = messageId
+        });
 
-        var message = await channel.GetMessageAsync(messageId, options: new RequestOptions() { CancelToken = ct });
-        if (message is null) {
-            _logger.LogWarning("Message with ID {MessageId} not found in channel {ChannelId}",
-                messageId, channelId);
-            return;
-        }
-        
-        using var scope = _serviceProvider.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<IDbContext>();
-        var objChunks = await db.ObjectChunks
-            .AsTracking()
-            .Where(c => c.MessageId == messageId)
-            .ToListAsync(ct);
-        if (objChunks.Count == 0) {
-            _logger.LogWarning("No object chunks found for message {MessageId}", messageId);
-            return;
-        }
-
-        foreach (var chunk in objChunks) {
-            var attachment = message.Attachments.FirstOrDefault(a => a.Id == chunk.AttachmentId);
-            if (attachment is null) {
-                _logger.LogWarning("Attachment with ID {AttachmentId} not found in message {MessageId}",
-                    chunk.AttachmentId, messageId);
-                continue;
+        try {
+            var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
+            var channel = await client.GetChannelAsync(channelId) as IMessageChannel;
+            if (channel is null) {
+                _logger.LogWarning("Channel with ID {ChannelId} not found for message refresh", channelId);
+                return;
             }
-            chunk.BlobUrl = attachment.Url;
-            chunk.ExpireAt = _timeProvider.GetUtcNow() + ObjectChunk.ExpireAfter;
+
+            var message = await channel.GetMessageAsync(messageId, options: new RequestOptions { CancelToken = ct });
+            if (message is null) {
+                _logger.LogWarning("Message with ID {MessageId} not found in channel {ChannelId}", messageId, channelId);
+                return;
+            }
+
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<IDbContext>();
+            var objChunks = await db.ObjectChunks
+                .AsTracking()
+                .Where(c => c.MessageId == messageId)
+                .ToListAsync(ct);
+
+            if (objChunks.Count == 0) {
+                _logger.LogWarning("No object chunks found for message {MessageId}", messageId);
+                return;
+            }
+
+            var refreshedChunks = 0;
+            foreach (var chunk in objChunks) {
+                var attachment = message.Attachments.FirstOrDefault(a => a.Id == chunk.AttachmentId);
+                if (attachment is null) {
+                    _logger.LogWarning("Attachment with ID {AttachmentId} not found in message {MessageId}", chunk.AttachmentId, messageId);
+                    continue;
+                }
+
+                chunk.BlobUrl = attachment.Url;
+                chunk.ExpireAt = _timeProvider.GetUtcNow() + ObjectChunk.ExpireAfter;
+                refreshedChunks++;
+            }
+
+            if (refreshedChunks == 0) {
+                _logger.LogWarning("No attachments refreshed for message {MessageId}", messageId);
+                return;
+            }
+
+            await db.SaveChangesAsync(ct);
+            _logger.LogInformation("Refreshed {ChunkCount} object chunks for message {MessageId}", refreshedChunks, messageId);
         }
-        
-        await db.SaveChangesAsync(ct);
+        catch (Exception ex) when (!ct.IsCancellationRequested) {
+            _logger.LogError(ex, "Failed to refresh Discord message {MessageId} in channel {ChannelId}", messageId, channelId);
+            throw;
+        }
     }
 
     public async Task BulkDeleteAsync(ulong[] ids, ulong channel, CancellationToken ct) {
@@ -184,6 +208,7 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
     }
 
     public async ValueTask DisposeAsync() {
+        _isReady = false;
         foreach (var client in _discordClients) {
             if (client is not null) {
                 try {
@@ -199,4 +224,6 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
 
         _discordClients = null!;
     }
+
+    public bool IsReady => _isReady;
 }

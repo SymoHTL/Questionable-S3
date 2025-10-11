@@ -10,33 +10,22 @@ public class S3ObjectHandler : IS3ObjectHandler {
     private readonly IDbContext _db;
     private readonly IBucketStore _bucketStore;
     private readonly TimeProvider _timeProvider;
+    private readonly IObjectEncryptionService _encryptionService;
 
     public S3ObjectHandler(ILogger<S3ObjectHandler> logger, IDbContext db, IBucketStore bucketStore,
-        TimeProvider timeProvider) {
+        TimeProvider timeProvider, IObjectEncryptionService encryptionService) {
         _logger = logger;
         _db = db;
         _bucketStore = bucketStore;
         _timeProvider = timeProvider;
+        _encryptionService = encryptionService;
     }
 
     public async Task<S3Object> Read(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized request for bucket {Bucket} and key {Key}", ctx.Request.Bucket,
-                ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
-
-        if (md.Bucket is null) {
-            _logger.LogWarning("Bucket not found for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
-        }
+        var md = RequireMetadata(ctx, "object read");
+        EnsureAuthorized(md, ctx, "object read");
+        var bucket = RequireBucket(md, ctx, "object read");
 
         long versionId = 1;
         if (!string.IsNullOrEmpty(ctx.Request.VersionId))
@@ -62,13 +51,26 @@ public class S3ObjectHandler : IS3ObjectHandler {
         }
 
         var isLatest = true;
-        var latestVersion = (await _db.Objects.ReadObjectLatestMetadataAsync(md.Bucket.Id, md.Obj.Key))?.Version;
+    var latestVersion = (await _db.Objects.ReadObjectLatestMetadataAsync(bucket.Id, md.Obj.Key))?.Version;
         if (md.Obj.Version < latestVersion) isLatest = false;
 
         var user = await _db.Users.ReadUserByIdAsync(md.Obj.OwnerId);
         var owner = user is not null ? new Owner(user.Id, user.Name) : null;
 
-        var stream = await _bucketStore.GetObjectStreamAsync(md.Bucket, md.Obj, ctx.Http.Token);
+    var stream = await _bucketStore.GetObjectStreamAsync(bucket, md.Obj, ctx.Http.Token);
+
+        if (md.Obj.IsEncrypted) {
+            try {
+                stream = await _encryptionService.DecryptAsync(stream, md.Obj, ctx.Http.Token);
+                ctx.Response.Headers[Constants.Headers.ServerSideEncryption] =
+                    md.Obj.EncryptionAlgorithm ?? Constants.EncryptionAlgorithms.Aes256;
+            }
+            catch (Exception ex) {
+                _logger.LogError(ex, "Failed to decrypt object {Bucket}/{Key} version {Version}",
+                    ctx.Request.Bucket, ctx.Request.Key, md.Obj.Version);
+                throw new S3Exception(new Error(ErrorCode.InternalError));
+            }
+        }
 
         return new S3Object(md.Obj.Key, md.Obj.Version.ToString(), isLatest, md.Obj.LastUpdateUtc.UtcDateTime,
             md.Obj.Etag,
@@ -78,27 +80,13 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
     public async Task Write(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized request for bucket {Bucket} and key {Key}", ctx.Request.Bucket,
-                ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
-
-        if (md.Bucket is null) {
-            _logger.LogWarning("Bucket not found for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
-        }
+        var md = RequireMetadata(ctx, "object write");
+        EnsureAuthorized(md, ctx, "object write");
+        var bucket = RequireBucket(md, ctx, "object write");
 
         var obj = await _db.Objects.ReadObjectLatestMetadataAsync(
-            md.Bucket.Id, ctx.Request.Key);
-        if (obj is not null && !md.Bucket.EnableVersioning) {
+            bucket.Id, ctx.Request.Key);
+        if (obj is not null && !bucket.EnableVersioning) {
             _logger.LogWarning("Versioning is disabled for bucket {Bucket}, prohibiting write to {Key}",
                 ctx.Request.Bucket, ctx.Request.Key);
             throw new S3Exception(new Error(ErrorCode.InvalidBucketState));
@@ -112,7 +100,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
             SetUser(md.User);
 
-            obj.BucketId = md.Bucket.Id;
+            obj.BucketId = bucket.Id;
             obj.Version = 1;
             obj.BlobFilename = obj.Id;
             obj.ContentLength = ctx.Http.Request.ContentLength;
@@ -128,7 +116,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
             SetUser(md.User);
 
             obj.Id = Guid.NewGuid().ToString();
-            obj.BucketId = md.Bucket.Id;
+            obj.BucketId = bucket.Id;
             obj.Version += 1;
             obj.BlobFilename = obj.Id;
             obj.ContentLength = ctx.Http.Request.ContentLength;
@@ -151,88 +139,316 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
         #endregion
 
-        #region Write-Data-to-Temp-and-to-Bucket
-
-        var tempFilePath = $"{Constants.File.TempDir}/{Ulid.NewUlid()}";
-        if (!Directory.Exists(Constants.File.TempDir)) {
-            Directory.CreateDirectory(Constants.File.TempDir);
+        var encryptionRequest = ResolveEncryptionRequest(ctx.Http.Request.Headers);
+        var copySourceHeader = ctx.Http.Request.Headers["x-amz-copy-source"];
+        if (!string.IsNullOrWhiteSpace(copySourceHeader)) {
+            await HandleCopyAsync(ctx, md, obj, copySourceHeader, encryptionRequest);
+            return;
         }
 
+        #region Write-Data-to-Temp-and-to-Bucket
+
+        var tempDirectory = Constants.File.TempDir;
+        if (!Directory.Exists(tempDirectory)) {
+            Directory.CreateDirectory(tempDirectory);
+        }
+
+        var tempFilePath = Path.Combine(tempDirectory, Ulid.NewUlid().ToString());
         long totalLength = 0;
-        var writeSuccess = false;
 
         try {
-            await using (FileStream fs = new FileStream(tempFilePath, FileMode.Create)) {
+            await using (FileStream fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write, FileShare.None)) {
                 if (ctx.Request.Chunked) {
                     while (true) {
                         Chunk chunk = await ctx.Request.ReadChunk();
                         if (chunk == null) break;
 
                         if (chunk.Data is { Length: > 0 }) {
-                            await fs.WriteAsync(chunk.Data.AsMemory(0, chunk.Data.Length));
+                            await fs.WriteAsync(chunk.Data.AsMemory(0, chunk.Data.Length), ctx.Http.Token);
                             totalLength += chunk.Data.Length;
                         }
 
                         if (chunk.IsFinal) break;
                     }
                 }
-                else {
-                    if (ctx.Request.Data != null && ctx.Http.Request.ContentLength > 0) {
-                        var bytesRemaining = ctx.Http.Request.ContentLength;
-                        var buffer = new byte[65536];
+                else if (ctx.Request.Data != null && ctx.Http.Request.ContentLength > 0) {
+                    var bytesRemaining = ctx.Http.Request.ContentLength;
+                    var buffer = new byte[65536];
 
-                        while (bytesRemaining > 0) {
-                            var bytesRead = await ctx.Request.Data.ReadAsync(buffer);
-                            if (bytesRead <= 0) continue;
+                    while (bytesRemaining > 0) {
+                        var bytesRead = await ctx.Request.Data.ReadAsync(buffer, ctx.Http.Token);
+                        if (bytesRead <= 0) continue;
 
-                            bytesRemaining -= bytesRead;
-                            await fs.WriteAsync(buffer.AsMemory(0, bytesRead));
-                        }
-
-                        totalLength = obj.ContentLength;
+                        bytesRemaining -= bytesRead;
+                        await fs.WriteAsync(buffer.AsMemory(0, bytesRead), ctx.Http.Token);
                     }
+
+                    totalLength = ctx.Http.Request.ContentLength;
                 }
             }
-
-            obj.ContentLength = totalLength;
-            writeSuccess = await _bucketStore.AddObjectAsync(tempFilePath, md.Bucket, obj, ctx.Http.Token);
         }
         catch (Exception e) {
             _logger.LogError(e, "Error writing object {Bucket}/{Key} using tempfile {TempFilePath}",
                 ctx.Request.Bucket, ctx.Request.Key, tempFilePath);
+            DeleteFileIfExists(tempFilePath);
             throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-        finally {
-            File.Delete(tempFilePath);
         }
 
-        if (!writeSuccess) {
-            _logger.LogWarning("Failed to write object {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
+        obj.ContentLength = totalLength;
+
+        EncryptionOutcome? encryptionOutcome = null;
+        try {
+            encryptionOutcome = await PersistObjectAsync(ctx, md, obj, tempFilePath, encryptionRequest);
+        }
+        finally {
+            DeleteFileIfExists(tempFilePath);
+        }
+
+        if (encryptionOutcome is not null) {
+            ctx.Response.Headers[Constants.Headers.ServerSideEncryption] = encryptionOutcome.Algorithm;
         }
 
         #endregion
 
         await ApplyAclHeadersAsync(ctx, md, obj);
+
+        if (!string.IsNullOrWhiteSpace(obj.Etag)) {
+            ctx.Response.Headers["ETag"] = $"\"{obj.Etag.ToLowerInvariant()}\"";
+        }
+    }
+
+    private RequestMetadata RequireMetadata(S3Context ctx, string operation) {
+        if (ctx.Metadata is RequestMetadata md && md is not null) return md;
+
+        _logger.LogWarning("Request metadata is null during {Operation} for request {@Request}", operation, ctx.Request);
+        throw new S3Exception(new Error(ErrorCode.InternalError));
+    }
+
+    private void EnsureAuthorized(RequestMetadata md, S3Context ctx, string operation) {
+        if (md.Authorization != EAuthorizationResult.NotAuthorized) return;
+
+        if (!string.IsNullOrWhiteSpace(ctx.Request.Key)) {
+            _logger.LogWarning("Unauthorized {Operation} for bucket {Bucket} and key {Key}", operation, ctx.Request.Bucket,
+                ctx.Request.Key);
+        }
+        else {
+            _logger.LogWarning("Unauthorized {Operation} for bucket {Bucket}", operation, ctx.Request.Bucket);
+        }
+
+        throw new S3Exception(new Error(ErrorCode.AccessDenied));
+    }
+
+    private Domain.Entities.Bucket RequireBucket(RequestMetadata md, S3Context ctx, string operation) {
+        if (md.Bucket is not null) return md.Bucket;
+
+        _logger.LogWarning("Bucket not found during {Operation} {@Request}", operation, ctx.Request);
+        throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
+    }
+
+    private async Task<EncryptionOutcome?> PersistObjectAsync(S3Context ctx, RequestMetadata md, Object obj, string plaintextFilePath,
+        EncryptionRequest? encryptionRequest) {
+        ArgumentNullException.ThrowIfNull(ctx);
+        ArgumentNullException.ThrowIfNull(md);
+        ArgumentNullException.ThrowIfNull(obj);
+        ArgumentException.ThrowIfNullOrEmpty(plaintextFilePath);
+
+        var bucket = RequireBucket(md, ctx, "object persist");
+
+        EncryptionOutcome? encryptionOutcome = null;
+        var payloadPath = plaintextFilePath;
+        var writeSuccess = false;
+
+        try {
+            if (encryptionRequest is not null) {
+                try {
+                    encryptionOutcome = await _encryptionService.EncryptAsync(plaintextFilePath, encryptionRequest, ctx.Http.Token);
+                    payloadPath = encryptionOutcome.EncryptedFilePath;
+                    ApplyEncryptionOutcome(obj, encryptionOutcome, encryptionRequest);
+                }
+                catch (Exception ex) {
+                    _logger.LogError(ex, "Failed to encrypt object {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
+                    throw new S3Exception(new Error(ErrorCode.InternalError));
+                }
+            }
+            else {
+                PrepareUnencryptedObject(obj);
+            }
+
+            writeSuccess = await _bucketStore.AddObjectAsync(payloadPath, bucket, obj, ctx.Http.Token);
+        }
+        catch (S3Exception) {
+            throw;
+        }
+        catch (Exception ex) {
+            _logger.LogError(ex, "Failed to persist object {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
+            throw new S3Exception(new Error(ErrorCode.InternalError));
+        }
+        finally {
+            if (encryptionOutcome is not null) {
+                DeleteFileIfExists(encryptionOutcome.EncryptedFilePath);
+            }
+        }
+
+        if (!writeSuccess) {
+            _logger.LogWarning("Bucket store rejected object {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
+            throw new S3Exception(new Error(ErrorCode.InternalError));
+        }
+
+        return encryptionOutcome;
+    }
+
+    private async Task HandleCopyAsync(S3Context ctx, RequestMetadata md, Object obj, string copySourceHeader, EncryptionRequest? encryptionRequest) {
+        ArgumentNullException.ThrowIfNull(ctx);
+        ArgumentNullException.ThrowIfNull(md);
+        ArgumentNullException.ThrowIfNull(obj);
+        ArgumentException.ThrowIfNullOrEmpty(copySourceHeader);
+
+        RequireBucket(md, ctx, "object copy target");
+
+        var trimmed = copySourceHeader.Trim();
+        if (trimmed.StartsWith('/')) trimmed = trimmed[1..];
+        var separatorIndex = trimmed.IndexOf('/');
+        if (separatorIndex <= 0 || separatorIndex == trimmed.Length - 1) {
+            _logger.LogWarning("Invalid copy source header {Header}", copySourceHeader);
+            throw new S3Exception(new Error(ErrorCode.InvalidArgument));
+        }
+
+    var sourceBucketName = System.Uri.UnescapeDataString(trimmed[..separatorIndex]);
+        var sourceKeySegment = trimmed[(separatorIndex + 1)..];
+        string? versionIdQuery = null;
+        var queryIndex = sourceKeySegment.IndexOf('?');
+        if (queryIndex >= 0) {
+            versionIdQuery = sourceKeySegment[(queryIndex + 1)..];
+            sourceKeySegment = sourceKeySegment[..queryIndex];
+        }
+
+        var sourceKey = System.Uri.UnescapeDataString(sourceKeySegment);
+
+        var sourceBucket = await _db.Buckets
+            .AsNoTracking()
+            .FirstOrDefaultAsync(b => b.Name == sourceBucketName, ctx.Http.Token);
+        if (sourceBucket is null) {
+            _logger.LogWarning("Copy source bucket {Bucket} not found", sourceBucketName);
+            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
+        }
+
+        long? versionId = null;
+        var versionHeader = ctx.Http.Request.Headers["x-amz-copy-source-version-id"];
+        if (!string.IsNullOrWhiteSpace(versionHeader)) {
+            if (!long.TryParse(versionHeader, out var parsedVersion)) {
+                throw new S3Exception(new Error(ErrorCode.NoSuchVersion));
+            }
+
+            versionId = parsedVersion;
+        }
+        else if (!string.IsNullOrWhiteSpace(versionIdQuery)) {
+            var segments = versionIdQuery.Split('&', System.StringSplitOptions.RemoveEmptyEntries);
+            foreach (var segment in segments) {
+                var parts = segment.Split('=', 2);
+                if (parts.Length == 2 && parts[0].Equals("versionId", System.StringComparison.OrdinalIgnoreCase)) {
+                    var value = System.Uri.UnescapeDataString(parts[1]);
+                    if (!long.TryParse(value, out var parsedVersion)) {
+                        throw new S3Exception(new Error(ErrorCode.NoSuchVersion));
+                    }
+
+                    versionId = parsedVersion;
+                    break;
+                }
+            }
+        }
+
+        IQueryable<Object> objectQuery = _db.Objects
+            .AsNoTracking()
+            .Include(o => o.FileChunks)
+            .Where(o => o.BucketId == sourceBucket.Id && o.Key == sourceKey);
+
+        Object? sourceObject;
+        if (versionId.HasValue) {
+            sourceObject = await objectQuery.FirstOrDefaultAsync(o => o.Version == versionId.Value, ctx.Http.Token);
+            if (sourceObject is null) {
+                _logger.LogWarning("Copy source version {Version} not found for {Bucket}/{Key}", versionId.Value, sourceBucketName, sourceKey);
+                throw new S3Exception(new Error(ErrorCode.NoSuchVersion));
+            }
+        }
+        else {
+            sourceObject = await objectQuery
+                .OrderByDescending(o => o.Version)
+                .FirstOrDefaultAsync(ctx.Http.Token);
+            if (sourceObject is null) {
+                _logger.LogWarning("Copy source object {Bucket}/{Key} not found", sourceBucketName, sourceKey);
+                throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+            }
+        }
+
+        if (sourceObject.DeleteMarker) {
+            _logger.LogWarning("Copy source object {Bucket}/{Key} is a delete marker", sourceBucketName, sourceKey);
+            throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+        }
+
+        obj.ContentType = sourceObject.ContentType;
+        obj.IsFolder = sourceObject.IsFolder;
+
+        var tempDirectory = Constants.File.TempDir;
+        if (!Directory.Exists(tempDirectory)) {
+            Directory.CreateDirectory(tempDirectory);
+        }
+
+        var tempPlaintextPath = Path.Combine(tempDirectory, Ulid.NewUlid().ToString());
+
+        try {
+            await using var sourceStream = await _bucketStore.GetObjectStreamAsync(sourceBucket, sourceObject, ctx.Http.Token);
+            Stream payloadStream = sourceStream;
+            Stream? decryptedStream = null;
+
+            try {
+                if (sourceObject.IsEncrypted) {
+                    decryptedStream = await _encryptionService.DecryptAsync(sourceStream, sourceObject, ctx.Http.Token);
+                    payloadStream = decryptedStream;
+                }
+
+                await using var fs = new FileStream(tempPlaintextPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                await payloadStream.CopyToAsync(fs, ctx.Http.Token);
+            }
+            finally {
+                decryptedStream?.Dispose();
+            }
+        }
+        catch (S3Exception) {
+            DeleteFileIfExists(tempPlaintextPath);
+            throw;
+        }
+        catch (Exception ex) {
+            _logger.LogError(ex, "Failed to hydrate copy source {Bucket}/{Key}", sourceBucketName, sourceKey);
+            DeleteFileIfExists(tempPlaintextPath);
+            throw new S3Exception(new Error(ErrorCode.InternalError));
+        }
+
+        try {
+            var contentInfo = new FileInfo(tempPlaintextPath);
+            obj.ContentLength = contentInfo.Length;
+
+            var encryptionOutcome = await PersistObjectAsync(ctx, md, obj, tempPlaintextPath, encryptionRequest);
+
+            if (encryptionOutcome is not null) {
+                ctx.Response.Headers[Constants.Headers.ServerSideEncryption] = encryptionOutcome.Algorithm;
+            }
+
+            await ApplyAclHeadersAsync(ctx, md, obj);
+
+            if (!string.IsNullOrWhiteSpace(obj.Etag)) {
+                ctx.Response.Headers["ETag"] = $"\"{obj.Etag.ToLowerInvariant()}\"";
+            }
+        }
+        finally {
+            DeleteFileIfExists(tempPlaintextPath);
+        }
     }
 
     public async Task Delete(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized request for bucket {Bucket} and key {Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
-
-        if (md.Bucket is null) {
-            _logger.LogWarning("Bucket not found for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
-        }
+        var md = RequireMetadata(ctx, "object delete");
+        EnsureAuthorized(md, ctx, "object delete");
+        var bucket = RequireBucket(md, ctx, "object delete");
 
         long versionId = 1;
         if (!string.IsNullOrEmpty(ctx.Request.VersionId)) {
@@ -256,7 +472,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
             throw new S3Exception(new Error(ErrorCode.NoSuchKey));
         }
 
-        if (md.Bucket.EnableVersioning) {
+        if (bucket.EnableVersioning) {
             md.Obj.DeleteMarker = true;
             _db.Objects.Update(md.Obj);
             await _db.SaveChangesAsync();
@@ -266,13 +482,14 @@ public class S3ObjectHandler : IS3ObjectHandler {
         }
 
         // Delete object version, ACL, and tags using _bucketStore and _db
-        await _bucketStore.DeleteObjectVersionAsync(md.Bucket, md.Obj, versionId, ctx.Http.Token);
-        await _db.ObjectAcls.DeleteObjectVersionAclAsync(md.Bucket.Id, md.Obj.Id, versionId);
-        await _db.ObjectTags.DeleteObjectVersionTagsAsync(md.Bucket.Id, md.Obj.Id, versionId);
+        await _bucketStore.DeleteObjectVersionAsync(bucket, md.Obj, versionId, ctx.Http.Token);
+        await _db.ObjectAcls.DeleteObjectVersionAclAsync(bucket.Id, md.Obj.Id, versionId);
+        await _db.ObjectTags.DeleteObjectVersionTagsAsync(bucket.Id, md.Obj.Id, versionId);
     }
 
     private async Task ApplyAclHeadersAsync(S3Context ctx, RequestMetadata md, Object obj) {
         if (md.User is null) return;
+        var bucket = RequireBucket(md, ctx, "ACL apply");
 
         List<Grant> grants = await Grants.GrantsFromHeaders(_db, md.User, ctx.Http.Request.Headers);
         if (grants is not { Count: > 0 }) return;
@@ -316,7 +533,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
                 var objectAcl = new ObjectAcl {
                     UserId = curr.Grantee.ID,
                     IssuedByUserId = md.User.Id,
-                    BucketId = md.Bucket.Id,
+                    BucketId = bucket.Id,
                     ObjectId = obj.Id,
                     PermitRead = permitRead,
                     PermitWrite = permitWrite,
@@ -333,7 +550,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
                 var objectAcl = new ObjectAcl {
                     UserGroup = curr.Grantee.URI,
                     IssuedByUserId = md.User.Id,
-                    BucketId = md.Bucket.Id,
+                    BucketId = bucket.Id,
                     ObjectId = obj.Id,
                     PermitRead = permitRead,
                     PermitWrite = permitWrite,
@@ -351,6 +568,76 @@ public class S3ObjectHandler : IS3ObjectHandler {
         await _db.SaveChangesAsync(ctx.Http.Token);
     }
 
+    private EncryptionRequest? ResolveEncryptionRequest(NameValueCollection headers) {
+        if (headers is null || headers.Count == 0) return null;
+
+        if (!string.IsNullOrWhiteSpace(headers[Constants.Headers.ServerSideEncryptionCustomerAlgorithm]) ||
+            !string.IsNullOrWhiteSpace(headers[Constants.Headers.ServerSideEncryptionCustomerKey]) ||
+            !string.IsNullOrWhiteSpace(headers[Constants.Headers.ServerSideEncryptionCustomerKeyMd5])) {
+            _logger.LogWarning("Received unsupported SSE-C headers");
+            throw new S3Exception(new Error(ErrorCode.NotImplemented));
+        }
+
+        if (!string.IsNullOrWhiteSpace(headers[Constants.Headers.ServerSideEncryptionAwsKmsKeyId])) {
+            _logger.LogWarning("Received unsupported SSE-KMS request");
+            throw new S3Exception(new Error(ErrorCode.NotImplemented));
+        }
+
+        var algorithm = headers[Constants.Headers.ServerSideEncryption];
+        if (string.IsNullOrWhiteSpace(algorithm)) return null;
+
+        if (!string.Equals(algorithm, Constants.EncryptionAlgorithms.Aes256, System.StringComparison.OrdinalIgnoreCase)) {
+            _logger.LogWarning("Unsupported SSE algorithm {Algorithm} requested", algorithm);
+            throw new S3Exception(new Error(ErrorCode.InvalidArgument));
+        }
+
+        if (!string.IsNullOrWhiteSpace(headers[Constants.Headers.ServerSideEncryptionContext])) {
+            _logger.LogWarning("Encryption context supplied for SSE-S3 request; rejecting");
+            throw new S3Exception(new Error(ErrorCode.InvalidArgument));
+        }
+
+        return new EncryptionRequest(Constants.EncryptionAlgorithms.Aes256, null, null);
+    }
+
+    private static void ApplyEncryptionOutcome(Object obj, EncryptionOutcome outcome, EncryptionRequest request) {
+        obj.IsEncrypted = true;
+        obj.EncryptionAlgorithm = outcome.Algorithm;
+        obj.EncryptionKeyId = outcome.KeyId;
+        obj.EncryptionMetadata = outcome.MetadataJson;
+        obj.EncryptedDataKey = outcome.ProtectedDataKey;
+        obj.EncryptionContext = request.Context;
+        obj.StorageContentLength = outcome.CiphertextLength;
+        obj.Md5 = outcome.PlaintextMd5Hex;
+        obj.Etag = outcome.PlaintextMd5Hex;
+    }
+
+    private static void PrepareUnencryptedObject(Object obj) {
+        obj.IsEncrypted = false;
+        obj.EncryptionAlgorithm = null;
+        obj.EncryptionKeyId = null;
+        obj.EncryptionMetadata = null;
+        obj.EncryptedDataKey = null;
+        obj.EncryptionContext = null;
+        obj.StorageContentLength = obj.ContentLength;
+        obj.Md5 = string.Empty;
+        obj.Etag = string.Empty;
+    }
+
+    private EncryptionRequest? BuildEncryptionRequest(MultipartUpload upload) {
+        ArgumentNullException.ThrowIfNull(upload);
+        if (!upload.UseServerSideEncryption) return null;
+
+        var algorithm = upload.EncryptionAlgorithm;
+        if (string.IsNullOrWhiteSpace(algorithm)) algorithm = Constants.EncryptionAlgorithms.Aes256;
+
+        if (!string.Equals(algorithm, Constants.EncryptionAlgorithms.Aes256, System.StringComparison.OrdinalIgnoreCase)) {
+            _logger.LogWarning("Unsupported multipart SSE algorithm {Algorithm} requested", algorithm);
+            throw new S3Exception(new Error(ErrorCode.InvalidArgument));
+        }
+
+        return new EncryptionRequest(Constants.EncryptionAlgorithms.Aes256, upload.EncryptionKeyId, upload.EncryptionContext);
+    }
+
     private (string Id, string DisplayName) ResolveActor(RequestMetadata md, S3Context ctx, MultipartUpload? upload = null) {
         if (md.User is not null) return (md.User.Id, md.User.Name);
 
@@ -362,17 +649,14 @@ public class S3ObjectHandler : IS3ObjectHandler {
     }
 
     private async Task<MultipartUpload> GetMultipartUploadAsync(S3Context ctx, RequestMetadata md) {
-        if (md.Bucket is null) {
-            _logger.LogWarning("Bucket not found for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
-        }
+        var bucket = RequireBucket(md, ctx, "multipart lookup");
 
         if (string.IsNullOrEmpty(ctx.Request.UploadId)) {
             _logger.LogWarning("UploadId missing for request {@Request}", ctx.Request);
             throw new S3Exception(new Error(ErrorCode.NoSuchUpload));
         }
 
-        var upload = await _db.MultipartUploads.ReadMultipartUploadAsync(md.Bucket.Id, ctx.Request.Key, ctx.Request.UploadId, ctx.Http.Token);
+    var upload = await _db.MultipartUploads.ReadMultipartUploadAsync(bucket.Id, ctx.Request.Key, ctx.Request.UploadId, ctx.Http.Token);
         if (upload is null || upload.IsAborted) {
             _logger.LogWarning("Multipart upload {UploadId} not found for bucket {Bucket} and key {Key}", ctx.Request.UploadId, ctx.Request.Bucket, ctx.Request.Key);
             throw new S3Exception(new Error(ErrorCode.NoSuchUpload));
@@ -426,27 +710,16 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
     public async Task<InitiateMultipartUploadResult> CreateMultipartUpload(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
+        var md = RequireMetadata(ctx, "multipart initiate");
+        EnsureAuthorized(md, ctx, "multipart initiate");
+        var bucket = RequireBucket(md, ctx, "multipart initiate");
 
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized multipart create for bucket {Bucket} and key {Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
-
-        if (md.Bucket is null) {
-            _logger.LogWarning("Bucket not found for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
-        }
-
+        var encryptionRequest = ResolveEncryptionRequest(ctx.Http.Request.Headers);
         var (ownerId, ownerName) = ResolveActor(md, ctx);
         var now = _timeProvider.GetUtcNow();
 
         var upload = new MultipartUpload {
-            BucketId = md.Bucket.Id,
+            BucketId = bucket.Id,
             Key = ctx.Request.Key,
             OwnerId = ownerId,
             OwnerDisplayName = ownerName,
@@ -456,30 +729,30 @@ public class S3ObjectHandler : IS3ObjectHandler {
                 ? "application/octet-stream"
                 : ctx.Http.Request.ContentType!,
             CreatedUtc = now,
-            LastUpdatedUtc = now
+            LastUpdatedUtc = now,
+            UseServerSideEncryption = encryptionRequest is not null,
+            EncryptionAlgorithm = encryptionRequest?.Algorithm,
+            EncryptionKeyId = encryptionRequest?.KeyId,
+            EncryptionContext = encryptionRequest?.Context
         };
 
-        upload.UploadDirectory = Path.Combine(Constants.File.TempDir, "multipart", md.Bucket.Id, upload.Id);
+    upload.UploadDirectory = Path.Combine(Constants.File.TempDir, "multipart", bucket.Id, upload.Id);
         EnsureUploadDirectory(upload);
 
         _db.MultipartUploads.Add(upload);
         await _db.SaveChangesAsync(ctx.Http.Token);
+
+        if (encryptionRequest is not null) {
+            ctx.Response.Headers[Constants.Headers.ServerSideEncryption] = encryptionRequest.Algorithm;
+        }
 
         return new InitiateMultipartUploadResult(ctx.Request.Bucket, ctx.Request.Key, upload.Id);
     }
 
     public async Task UploadPart(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized multipart part upload for bucket {Bucket} and key {Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
+        var md = RequireMetadata(ctx, "multipart upload-part");
+        EnsureAuthorized(md, ctx, "multipart upload-part");
 
         var upload = await GetMultipartUploadAsync(ctx, md);
         var partNumber = ctx.Request.PartNumber;
@@ -565,16 +838,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
     public async Task<ListPartsResult> ReadParts(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized multipart list for bucket {Bucket} and key {Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
+        var md = RequireMetadata(ctx, "multipart list-parts");
+        EnsureAuthorized(md, ctx, "multipart list-parts");
 
         var upload = await GetMultipartUploadAsync(ctx, md);
 
@@ -621,16 +886,9 @@ public class S3ObjectHandler : IS3ObjectHandler {
     public async Task<CompleteMultipartUploadResult> CompleteMultipartUpload(S3Context ctx, CompleteMultipartUpload request) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
         ArgumentNullException.ThrowIfNull(request, nameof(request));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized multipart complete for bucket {Bucket} and key {Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
+    var md = RequireMetadata(ctx, "multipart complete");
+    EnsureAuthorized(md, ctx, "multipart complete");
+    var bucket = RequireBucket(md, ctx, "multipart complete");
 
         if (request.Parts is null || request.Parts.Count == 0) {
             _logger.LogWarning("Multipart completion request missing parts for upload {UploadId}", ctx.Request.UploadId);
@@ -638,6 +896,12 @@ public class S3ObjectHandler : IS3ObjectHandler {
         }
 
         var upload = await GetMultipartUploadAsync(ctx, md);
+
+        var completionEncryptionRequest = ResolveEncryptionRequest(ctx.Http.Request.Headers);
+        if (completionEncryptionRequest is not null && !upload.UseServerSideEncryption) {
+            _logger.LogWarning("Multipart completion attempted to enable SSE for upload {UploadId} without prior negotiation", upload.Id);
+            throw new S3Exception(new Error(ErrorCode.InvalidRequest));
+        }
 
         var orderedRequestParts = request.Parts.OrderBy(p => p.PartNumber).ToList();
         if (orderedRequestParts.Count == 0) {
@@ -689,8 +953,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
             throw new S3Exception(new Error(ErrorCode.InternalError));
         }
 
-        var latestObject = await _db.Objects.ReadObjectLatestMetadataAsync(md.Bucket.Id, upload.Key, ctx.Http.Token);
-        if (latestObject is not null && !md.Bucket.EnableVersioning) {
+    var latestObject = await _db.Objects.ReadObjectLatestMetadataAsync(bucket.Id, upload.Key, ctx.Http.Token);
+    if (latestObject is not null && !bucket.EnableVersioning) {
             _logger.LogWarning("Versioning disabled for bucket {Bucket}; cannot complete multipart upload for existing object {Key}",
                 ctx.Request.Bucket, ctx.Request.Key);
             throw new S3Exception(new Error(ErrorCode.InvalidBucketState));
@@ -698,7 +962,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
         var (actorId, _) = ResolveActor(md, ctx, upload);
         var obj = new Object {
-            BucketId = md.Bucket.Id,
+            BucketId = bucket.Id,
             AuthorId = actorId,
             OwnerId = actorId,
             Key = upload.Key,
@@ -713,22 +977,22 @@ public class S3ObjectHandler : IS3ObjectHandler {
         obj.IsFolder = obj.ContentLength == 0 && obj.Key.EndsWith('/');
         obj.Version = latestObject is null ? 1 : latestObject.Version + 1;
 
-        var writeSuccess = false;
+    var uploadEncryptionRequest = BuildEncryptionRequest(upload);
+
+    EncryptionOutcome? encryptionOutcome = null;
 
         try {
-            writeSuccess = await _bucketStore.AddObjectAsync(finalFilePath, md.Bucket, obj, ctx.Http.Token);
-        }
-        catch (Exception ex) {
-            _logger.LogError(ex, "Failed to persist assembled multipart object {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
+            encryptionOutcome = await PersistObjectAsync(ctx, md, obj, finalFilePath, uploadEncryptionRequest);
         }
         finally {
             DeleteFileIfExists(finalFilePath);
         }
 
-        if (!writeSuccess) {
-            _logger.LogWarning("Bucket store rejected assembled multipart object {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
+        if (encryptionOutcome is not null) {
+            ctx.Response.Headers[Constants.Headers.ServerSideEncryption] = encryptionOutcome.Algorithm;
+        }
+        else if (uploadEncryptionRequest is not null) {
+            ctx.Response.Headers[Constants.Headers.ServerSideEncryption] = uploadEncryptionRequest.Algorithm;
         }
 
         await ApplyAclHeadersAsync(ctx, md, obj);
@@ -756,16 +1020,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
     public async Task AbortMultipartUpload(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
-        RequestMetadata md = ((RequestMetadata?)ctx.Metadata)!;
-        if (md is null) {
-            _logger.LogWarning("Request metadata is null for request {@Request}", ctx.Request);
-            throw new S3Exception(new Error(ErrorCode.InternalError));
-        }
-
-        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
-            _logger.LogWarning("Unauthorized multipart abort for bucket {Bucket} and key {Key}", ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.AccessDenied));
-        }
+        var md = RequireMetadata(ctx, "multipart abort");
+        EnsureAuthorized(md, ctx, "multipart abort");
 
         var upload = await GetMultipartUploadAsync(ctx, md);
 

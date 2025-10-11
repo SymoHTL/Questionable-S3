@@ -145,14 +145,26 @@ public class S3BucketHandler : IS3BucketHandler {
         }
 
         var cancellation = ctx.Http.Token;
+        var userId = md.User.Id;
 
-        var ownedBuckets = await _db.Buckets
+        var accessibleBuckets = await _db.Buckets
             .AsNoTracking()
-            .Where(b => b.OwnerGuid == md.User.Id)
+            .Where(b =>
+                b.OwnerGuid == userId ||
+                b.EnablePublicRead ||
+                _db.BucketAcls.Any(acl =>
+                    acl.BucketId == b.Id &&
+                    ((acl.PermitRead || acl.FullControl) &&
+                     (
+                         (!string.IsNullOrEmpty(acl.UserId) && acl.UserId == userId) ||
+                         (!string.IsNullOrEmpty(acl.UserGroup) &&
+                          (acl.UserGroup.Contains(Constants.UserGroups.AuthenticatedUsers) ||
+                           acl.UserGroup.Contains(Constants.UserGroups.AllUsers)))
+                     ))))
             .OrderBy(b => b.Name)
             .ToListAsync(cancellation);
 
-        var s3Buckets = ownedBuckets
+        var s3Buckets = accessibleBuckets
             .Select(b => new S3ServerLibrary.S3Objects.Bucket(b.Name, b.CreatedUtc.UtcDateTime))
             .ToList();
 

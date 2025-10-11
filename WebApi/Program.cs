@@ -22,6 +22,7 @@ builder.Services.AddS3Settings(builder.Configuration);
 builder.Services.AddS3Handlers();
 builder.Services.AddDiscord();
 builder.Services.AddHangfire(builder.Configuration);
+builder.Services.AddTelemetry(builder.Configuration, builder.Logging);
 
 builder.Services.AddSingleton<S3Manager>();
 
@@ -31,6 +32,7 @@ var app = builder.Build();
 await app.Services.UseDatabaseAsync(app.Configuration);
 await app.Services.UseDiscordAsync();
 
+app.AddCommands<HealthCommands>();
 app.AddCommand(async (S3Manager manager) => await manager.Run());
 
 await app.RunAsync();

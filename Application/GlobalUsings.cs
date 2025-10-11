@@ -1,5 +1,6 @@
 ﻿global using System.Net;
 global using Application.QueryableExtensions;
+global using Application.Services.Encryption;
 global using Application.Services.Interfaces;
 global using Application.Services.S3Handlers.Auth;
 global using Application.Services.S3Handlers.Helpers;
