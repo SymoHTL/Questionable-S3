@@ -10,5 +10,7 @@ public interface IDbContext {
     DbSet<ObjectAcl> ObjectAcls { get; }
     DbSet<ObjectTag> ObjectTags { get; }
     DbSet<ObjectChunk> ObjectChunks { get; set; }
+    DbSet<MultipartUpload> MultipartUploads { get; }
+    DbSet<MultipartUploadPart> MultipartUploadParts { get; }
     public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

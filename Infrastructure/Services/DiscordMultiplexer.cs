@@ -91,6 +91,44 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
         return channel.Id;
     }
 
+    public async Task DeleteChannelAsync(ulong channelId) {
+        var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
+
+        try {
+            var channel = await client.GetChannelAsync(channelId);
+
+            switch (channel) {
+                case SocketGuildChannel socketChannel:
+                    await socketChannel.DeleteAsync();
+                    return;
+                case RestGuildChannel restChannel:
+                    await restChannel.DeleteAsync();
+                    return;
+                case IGuildChannel guildChannelObj:
+                    await guildChannelObj.DeleteAsync();
+                    return;
+            }
+
+            var guild = client.Guilds.FirstOrDefault(g => g.Id == _guildId) ?? client.GetGuild(_guildId);
+            if (guild is null) {
+                _logger.LogWarning("Guild {GuildId} not found when deleting channel {ChannelId}", _guildId, channelId);
+                return;
+            }
+
+            var guildChannel = guild.GetChannel(channelId);
+            if (guildChannel is not null) {
+                await guildChannel.DeleteAsync();
+                return;
+            }
+
+            _logger.LogWarning("Channel {ChannelId} not found for deletion", channelId);
+        }
+        catch (Exception ex) {
+            _logger.LogError(ex, "Failed to delete channel {ChannelId}", channelId);
+            throw;
+        }
+    }
+
     public async Task RefreshObjectMessageAsync(ulong messageId, ulong channelId, CancellationToken ct) {
         var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
         var channel = await client.GetChannelAsync(channelId) as IMessageChannel;
@@ -130,6 +168,19 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
         }
         
         await db.SaveChangesAsync(ct);
+    }
+
+    public async Task BulkDeleteAsync(ulong[] ids, ulong channel, CancellationToken ct) {
+        if (ids.Length == 0) return;
+
+        var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
+        var messageChannel = await client.GetChannelAsync(channel) as IMessageChannel;
+        if (messageChannel is null) {
+            _logger.LogWarning("Channel with ID {ChannelId} not found for bulk delete", channel);
+            return;
+        }
+
+        foreach (var id in ids) await messageChannel.DeleteMessageAsync(id, options: new RequestOptions { CancelToken = ct, RetryMode = RetryMode.AlwaysRetry});
     }
 
     public async ValueTask DisposeAsync() {

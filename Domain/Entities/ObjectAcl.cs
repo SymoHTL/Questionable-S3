@@ -13,6 +13,7 @@ public class ObjectAcl {
 
     public string BucketId { get; set; } = null!;
 
+    [ForeignKey(nameof(Object))]
     public string ObjectId { get; set; } = null!;
 
     public bool PermitRead { get; set; } = false;
@@ -26,4 +27,5 @@ public class ObjectAcl {
     public bool FullControl { get; set; } = false;
 
     public DateTimeOffset CreatedUtc { get; set; }
+    public Object Object { get; set; } = null!;
 }

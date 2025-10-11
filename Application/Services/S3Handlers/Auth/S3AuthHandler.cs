@@ -40,7 +40,7 @@ public class S3AuthHandler : IS3AuthHandler {
 
 
         if (!string.IsNullOrEmpty(ctx.Request.Bucket)) {
-            md.Bucket = await _dbContext.Buckets.ReadByNameAsync(ctx.Request.Bucket);
+            md.Bucket = (await _dbContext.Buckets.ReadByNameAsync(ctx.Request.Bucket))!;
 
             if (md.Bucket is not null) {
                 md.BucketAcls = await _dbContext.BucketAcls.ReadByBucketIdAsync(md.Bucket.Id);
@@ -54,13 +54,13 @@ public class S3AuthHandler : IS3AuthHandler {
 
         if (md.Bucket is not null && ctx.Request.IsObjectRequest && !string.IsNullOrEmpty(ctx.Request.Key)) {
             if (string.IsNullOrEmpty(ctx.Request.VersionId)) {
-                md.Obj = await _dbContext.Objects.ReadObjectLatestMetadataAsync(md.Bucket.Id, ctx.Request.Key);
+                md.Obj = (await _dbContext.Objects.ReadObjectLatestMetadataAsync(md.Bucket.Id, ctx.Request.Key))!;
             }
             else {
                 long versionId = 1;
                 if (!string.IsNullOrEmpty(ctx.Request.VersionId)) long.TryParse(ctx.Request.VersionId, out versionId);
 
-                md.Obj = await _dbContext.Objects.ReadObjectByKeyAndVersionAsync(md.Bucket.Id,ctx.Request.Key, versionId);
+                md.Obj = (await _dbContext.Objects.ReadObjectByKeyAndVersionAsync(md.Bucket.Id,ctx.Request.Key, versionId))!;
             }
 
             if (md.Obj != null) {
@@ -310,6 +310,7 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectReadRange:
                 case S3RequestType.ObjectReadRetention:
                 case S3RequestType.ObjectReadTags:
+                case S3RequestType.ObjectReadParts:
                     if (md.Bucket.EnablePublicRead) allowed = true;
                     break;
 
@@ -320,6 +321,10 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectWriteLegalHold:
                 case S3RequestType.ObjectWriteRetention:
                 case S3RequestType.ObjectWriteTags:
+                case S3RequestType.ObjectCreateMultipartUpload:
+                case S3RequestType.ObjectUploadPart:
+                case S3RequestType.ObjectCompleteMultipartUpload:
+                case S3RequestType.ObjectAbortMultipartUpload:
                     if (md.Bucket.EnablePublicWrite) allowed = true;
                     break;
             }
@@ -341,6 +346,7 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectReadRange:
                 case S3RequestType.ObjectReadRetention:
                 case S3RequestType.ObjectReadTags:
+                case S3RequestType.ObjectReadParts:
                     allowed = md.BucketAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AllUsers)
                                                         && (b.PermitRead || b.FullControl));
@@ -359,6 +365,10 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectWriteLegalHold:
                 case S3RequestType.ObjectWriteRetention:
                 case S3RequestType.ObjectWriteTags:
+                case S3RequestType.ObjectCreateMultipartUpload:
+                case S3RequestType.ObjectUploadPart:
+                case S3RequestType.ObjectCompleteMultipartUpload:
+                case S3RequestType.ObjectAbortMultipartUpload:
                     allowed = md.BucketAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AllUsers)
                                                         && (b.PermitWrite || b.FullControl));
@@ -389,6 +399,7 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectReadRange:
                 case S3RequestType.ObjectReadRetention:
                 case S3RequestType.ObjectReadTags:
+                case S3RequestType.ObjectReadParts:
                     allowed = md.ObjectAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AllUsers)
                                                         && (b.PermitRead || b.FullControl));
@@ -407,6 +418,10 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectWriteLegalHold:
                 case S3RequestType.ObjectWriteRetention:
                 case S3RequestType.ObjectWriteTags:
+                case S3RequestType.ObjectCreateMultipartUpload:
+                case S3RequestType.ObjectUploadPart:
+                case S3RequestType.ObjectCompleteMultipartUpload:
+                case S3RequestType.ObjectAbortMultipartUpload:
                     allowed = md.ObjectAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AllUsers)
                                                         && (b.PermitWrite || b.FullControl));
@@ -466,6 +481,7 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectReadRange:
                 case S3RequestType.ObjectReadRetention:
                 case S3RequestType.ObjectReadTags:
+                case S3RequestType.ObjectReadParts:
                     allowed = md.BucketAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AuthenticatedUsers)
                                                         && (b.PermitRead || b.FullControl));
@@ -484,6 +500,10 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectWriteLegalHold:
                 case S3RequestType.ObjectWriteRetention:
                 case S3RequestType.ObjectWriteTags:
+                case S3RequestType.ObjectCreateMultipartUpload:
+                case S3RequestType.ObjectUploadPart:
+                case S3RequestType.ObjectCompleteMultipartUpload:
+                case S3RequestType.ObjectAbortMultipartUpload:
                     allowed = md.BucketAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AuthenticatedUsers)
                                                         && (b.PermitWrite || b.FullControl));
@@ -514,6 +534,7 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectReadRange:
                 case S3RequestType.ObjectReadRetention:
                 case S3RequestType.ObjectReadTags:
+                case S3RequestType.ObjectReadParts:
                     allowed = md.ObjectAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AuthenticatedUsers)
                                                         && (b.PermitRead || b.FullControl));
@@ -532,6 +553,10 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectWriteLegalHold:
                 case S3RequestType.ObjectWriteRetention:
                 case S3RequestType.ObjectWriteTags:
+                case S3RequestType.ObjectCreateMultipartUpload:
+                case S3RequestType.ObjectUploadPart:
+                case S3RequestType.ObjectCompleteMultipartUpload:
+                case S3RequestType.ObjectAbortMultipartUpload:
                     allowed = md.ObjectAcls.Exists(b => !string.IsNullOrEmpty(b.UserGroup)
                                                         && b.UserGroup.Contains(Constants.UserGroups.AuthenticatedUsers)
                                                         && (b.PermitWrite || b.FullControl));
@@ -562,6 +587,7 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectReadRange:
                 case S3RequestType.ObjectReadRetention:
                 case S3RequestType.ObjectReadTags:
+                case S3RequestType.ObjectReadParts:
                     allowed = md.BucketAcls.Exists(b => !string.IsNullOrEmpty(b.UserId)
                                                         && b.UserId.Equals(md.User.Id)
                                                         && (b.PermitRead || b.FullControl));
@@ -580,6 +606,10 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectWriteLegalHold:
                 case S3RequestType.ObjectWriteRetention:
                 case S3RequestType.ObjectWriteTags:
+                case S3RequestType.ObjectCreateMultipartUpload:
+                case S3RequestType.ObjectUploadPart:
+                case S3RequestType.ObjectCompleteMultipartUpload:
+                case S3RequestType.ObjectAbortMultipartUpload:
                     allowed = md.BucketAcls.Exists(b => !string.IsNullOrEmpty(b.UserId)
                                                         && b.UserId.Equals(md.User.Id)
                                                         && (b.PermitWrite || b.FullControl));
@@ -610,6 +640,7 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectReadRange:
                 case S3RequestType.ObjectReadRetention:
                 case S3RequestType.ObjectReadTags:
+                case S3RequestType.ObjectReadParts:
                     allowed = md.ObjectAcls.Exists(b => !string.IsNullOrEmpty(b.UserId)
                                                         && b.UserId.Equals(md.User.Id)
                                                         && (b.PermitRead || b.FullControl));
@@ -628,6 +659,10 @@ public class S3AuthHandler : IS3AuthHandler {
                 case S3RequestType.ObjectWriteLegalHold:
                 case S3RequestType.ObjectWriteRetention:
                 case S3RequestType.ObjectWriteTags:
+                case S3RequestType.ObjectCreateMultipartUpload:
+                case S3RequestType.ObjectUploadPart:
+                case S3RequestType.ObjectCompleteMultipartUpload:
+                case S3RequestType.ObjectAbortMultipartUpload:
                     allowed = md.ObjectAcls.Exists(b => !string.IsNullOrEmpty(b.UserId)
                                                         && b.UserId.Equals(md.User.Id)
                                                         && (b.PermitWrite || b.FullControl));

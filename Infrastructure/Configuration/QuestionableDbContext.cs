@@ -12,6 +12,8 @@ public class QuestionableDbContext : DbContext, IDbContext, IDataProtectionKeyCo
     public DbSet<ObjectAcl> ObjectAcls { get; set; }
     public DbSet<ObjectTag> ObjectTags { get; set; }
     public DbSet<ObjectChunk> ObjectChunks { get; set; }
+    public DbSet<MultipartUpload> MultipartUploads { get; set; }
+    public DbSet<MultipartUploadPart> MultipartUploadParts { get; set; }
     
     public DbSet<DataProtectionKey> DataProtectionKeys { get; set; }
     

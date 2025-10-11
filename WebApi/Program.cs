@@ -21,6 +21,7 @@ builder.Services.AddDatabase(builder.Configuration);
 builder.Services.AddS3Settings(builder.Configuration);
 builder.Services.AddS3Handlers();
 builder.Services.AddDiscord();
+builder.Services.AddHangfire(builder.Configuration);
 
 builder.Services.AddSingleton<S3Manager>();
 

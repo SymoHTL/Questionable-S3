@@ -2,6 +2,7 @@
 using System.Security.Cryptography;
 using Discord;
 using Hangfire;
+using Hangfire.States;
 
 namespace Infrastructure.Services;
 
@@ -14,13 +15,15 @@ public class DiscordBucketStore : IBucketStore {
     private readonly DiscordMultiplexer _dcMultiplexer;
     private readonly HttpClient _httpClient;
     private readonly IRecurringJobManagerV2 _recurringJobs;
+    private readonly IBackgroundJobClientV2 _jobs;
 
     public DiscordBucketStore(TimeProvider timeProvider, IDbContext db, DiscordMultiplexer dcMultiplexer,
-        IHttpClientFactory httpClientFactory, IRecurringJobManagerV2 recurringJobs) {
+        IHttpClientFactory httpClientFactory, IRecurringJobManagerV2 recurringJobs, IBackgroundJobClientV2 jobs) {
         _timeProvider = timeProvider;
         _db = db;
         _dcMultiplexer = dcMultiplexer;
         _recurringJobs = recurringJobs;
+        _jobs = jobs;
         _httpClient = httpClientFactory.CreateClient(Constants.HttpClients.Discord);
     }
 
@@ -48,8 +51,8 @@ public class DiscordBucketStore : IBucketStore {
             _recurringJobs.AddOrUpdate<DiscordMultiplexer>(Constants.RecurringJobs.FormatObjectRefresh(messageId),
                 d => d.RefreshObjectMessageAsync(messageId, bucket.ChannelId!.Value, ct),
                 $"0 0 */{ObjectChunk.ExpireAfter.Hours} * *");
-            
         }
+
         await _db.SaveChangesAsync(ct);
         return true;
     }
@@ -57,14 +60,39 @@ public class DiscordBucketStore : IBucketStore {
     public Task<Stream> GetObjectStreamAsync(Bucket bucket, Object obj, CancellationToken ct) {
         if (!bucket.ChannelId.HasValue) throw new ArgumentNullException(nameof(bucket.ChannelId));
         if (obj.FileChunks.Count == 0) throw new InvalidOperationException("Object has no chunks associated with it.");
-        
+
         return GetObjectStreamAsync(bucket, obj, 0, obj.ContentLength - 1, ct);
     }
-    
-    public async Task<Stream> GetObjectStreamAsync(Bucket bucket, Object obj, long startByte, long endByte, CancellationToken ct) {
+
+    public async Task DeleteObjectVersionAsync(Bucket bucket, Object obj, long versionId, CancellationToken ct) {
+        if (!bucket.ChannelId.HasValue) throw new ArgumentNullException(nameof(bucket.ChannelId));
+
+        var channelId = bucket.ChannelId.Value;
+
+        var trackedObject = _db.Objects.Local.FirstOrDefault(o => o.Id == obj.Id)
+                             ?? await _db.Objects.FirstOrDefaultAsync(o => o.Id == obj.Id, ct);
+        if (trackedObject is null) return;
+
+        var objectChunks = await _db.ObjectChunks
+            .Where(c => c.ObjectId == trackedObject.Id)
+            .ToListAsync(ct);
+
+        if (objectChunks.Count == 0)
+            throw new InvalidOperationException("Object has no chunks associated with it.");
+
+        var messageIds = objectChunks.Select(c => c.MessageId).Distinct().ToArray();
+
+        _db.Objects.Remove(trackedObject);
+        await _db.SaveChangesAsync(ct);
+
+        _jobs.Create<DiscordMultiplexer>(dc => dc.BulkDeleteAsync(messageIds, channelId, ct), new EnqueuedState());
+    }
+
+    public async Task<Stream> GetObjectStreamAsync(Bucket bucket, Object obj, long startByte, long endByte,
+        CancellationToken ct) {
         if (!bucket.ChannelId.HasValue) throw new ArgumentNullException(nameof(bucket.ChannelId));
         if (obj.FileChunks.Count == 0) throw new InvalidOperationException("Object has no chunks associated with it.");
-        
+
         var stream = new MemoryStream();
         foreach (var chunk in obj.FileChunks) {
             var adjustedStart = Math.Max(startByte, chunk.StartByte) - chunk.StartByte;
@@ -72,13 +100,14 @@ public class DiscordBucketStore : IBucketStore {
 
             await StreamChunk(chunk.BlobUrl, adjustedStart, adjustedEnd, stream, ct);
         }
-        
+
         stream.Seek(0, SeekOrigin.Begin);
         return stream;
     }
 
 
-    private async Task StreamChunk(string url, long startByte, long endByte, Stream outputStream, CancellationToken ct) {
+    private async Task StreamChunk(string url, long startByte, long endByte, Stream outputStream,
+        CancellationToken ct) {
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(startByte, endByte);
         using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);

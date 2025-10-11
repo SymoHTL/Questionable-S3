@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  questionable-s3:
+    build:
+      context: .
+      dockerfile: WebApi/Dockerfile
+    image: questionable-s3:latest
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DefaultConnection: "server=mysql;port=3306;database=questionable-s3;user=root;password=example;Persist Security Info=False;Connect Timeout=300;Pooling=true;Min Pool Size=0;Max Pool Size=25;Connection Lifetime=0"
+      ConnectionStrings__Redis: "password=,redis:6379"
+      RedisPrefix: "QuestionableS3:"
+      S3Settings__Webserver__Hostname: 0.0.0.0
+      Discord__Tokens__0: ${DISCORD_TOKEN:-}
+      Discord__GuildId: ${DISCORD_GUILD_ID:-0}
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - temp-data:/app/temp
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: example
+      MYSQL_DATABASE: questionable-s3
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-pexample"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  mysql-data:
+  redis-data:
+  temp-data:

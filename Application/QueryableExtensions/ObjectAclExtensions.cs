@@ -7,4 +7,13 @@ public static class ObjectAclExtensions {
             .Where(acl => acl.ObjectId == objectId)
             .ToListAsync(ct);
     }
+    
+    public static async Task<int> DeleteObjectVersionAclAsync(this IQueryable<ObjectAcl> objectAcls,
+        string bucketId, string objectId, long version, CancellationToken ct = default) {
+       return await objectAcls
+            .Where(acl => acl.BucketId == bucketId && 
+                          acl.ObjectId == objectId && 
+                          acl.Object.Version == version)
+            .ExecuteDeleteAsync(ct);
+    }
 }
