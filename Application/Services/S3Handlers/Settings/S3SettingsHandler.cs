@@ -79,11 +79,16 @@ public class S3SettingsHandler : IS3SettingsHandler {
             case S3RequestType.ObjectReadRange:
             case S3RequestType.ObjectReadRetention:
             case S3RequestType.ObjectReadTags:
+            case S3RequestType.ObjectReadParts:
             case S3RequestType.ObjectWrite:
             case S3RequestType.ObjectWriteAcl:
             case S3RequestType.ObjectWriteLegalHold:
             case S3RequestType.ObjectWriteRetention:
             case S3RequestType.ObjectWriteTags:
+            case S3RequestType.ObjectCreateMultipartUpload:
+            case S3RequestType.ObjectUploadPart:
+            case S3RequestType.ObjectCompleteMultipartUpload:
+            case S3RequestType.ObjectAbortMultipartUpload:
                 md = _auth.AuthorizeObjectRequest(ctx, md);
                 break;
         }
@@ -121,9 +126,9 @@ public class S3SettingsHandler : IS3SettingsHandler {
             !segment.Equals("ready", StringComparison.OrdinalIgnoreCase))
             return false;
 
-    var method = ctx.Http.Request.Method.ToString();
-    var isHead = string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase);
-    if (!isHead && !string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)) {
+        var method = ctx.Http.Request.Method.ToString();
+        var isHead = string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase);
+        if (!isHead && !string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)) {
             ctx.Response.StatusCode = (int)HttpStatusCode.MethodNotAllowed;
             await ctx.Response.Send(string.Empty);
             return true;
@@ -134,7 +139,7 @@ public class S3SettingsHandler : IS3SettingsHandler {
             : await _healthStatusService.GetLivenessAsync(ctx.Http.Token);
 
         ctx.Response.ContentType = "application/json";
-    ctx.Response.StatusCode = report.Healthy ? (int)HttpStatusCode.OK : (int)HttpStatusCode.ServiceUnavailable;
+        ctx.Response.StatusCode = report.Healthy ? (int)HttpStatusCode.OK : (int)HttpStatusCode.ServiceUnavailable;
 
         if (!isHead) {
             var json = JsonSerializer.Serialize(new {

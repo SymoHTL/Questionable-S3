@@ -4,6 +4,7 @@ using System.Net;
 using System.Threading.Tasks;
 using Amazon.S3;
 using Amazon.S3.Model;
+using Amazon.S3.Transfer;
 using Amazon.S3.Util;
 using NUnit.Framework;
 
@@ -16,11 +17,13 @@ public abstract class S3IntegrationTestBase
     protected static readonly S3TestOptions Options = S3TestOptions.Load();
 
     protected AmazonS3Client Client { get; private set; } = null!;
+    protected TransferUtility TransferUtility  { get; private set; } = null!;
 
     [OneTimeSetUp]
     public async Task GlobalSetUpAsync()
     {
         Client = new AmazonS3Client(Options.CreateCredentials(), Options.CreateClientConfig());
+        TransferUtility = new TransferUtility(Client);
 
         if (_endpointAvailable is null)
         {
@@ -36,7 +39,9 @@ public abstract class S3IntegrationTestBase
     [OneTimeTearDown]
     public void GlobalTearDown()
     {
+        TransferUtility.Dispose();
         Client.Dispose();
+        Client = null!;
     }
 
     protected async Task<BucketHandle> CreateEphemeralBucketAsync()

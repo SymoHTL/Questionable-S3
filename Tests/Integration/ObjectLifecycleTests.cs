@@ -6,12 +6,13 @@ using System.Text;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Amazon.Runtime;
+using Amazon.S3.Transfer;
 using Tests.Infrastructure;
 
 namespace Tests.Integration;
 
 public class ObjectLifecycleTests : S3IntegrationTestBase {
-    private const int LargeObjectSizeBytes = 5 * 1024 * 1024; // 5 MB keeps runtime reasonable
+    private const int LargeObjectSizeBytes = 500 * 1024 * 1024;
 
     [Test]
     public async Task PutAndGetObject_RoundTripsUtf8Payload() {
@@ -58,7 +59,7 @@ public class ObjectLifecycleTests : S3IntegrationTestBase {
     }
 
     [Test]
-    public async Task PutAndGetLargeObject_PreservesContent() {
+    public async Task PutAndGetLargeObject_PreservesContentWithTransferUtility() {
         await using var bucket = await CreateEphemeralBucketAsync();
         var key = bucket.TrackKey($"large-object-{Guid.NewGuid():N}.bin");
 
@@ -67,13 +68,74 @@ public class ObjectLifecycleTests : S3IntegrationTestBase {
         var originalHash = MD5.HashData(buffer);
 
         await using (var uploadStream = new MemoryStream(buffer, writable: false)) {
-            await Client.PutObjectAsync(new PutObjectRequest {
+            await TransferUtility.UploadAsync(new TransferUtilityUploadRequest() {
                 BucketName = bucket.Name,
                 Key = key,
                 InputStream = uploadStream,
                 ContentType = "application/octet-stream",
                 AutoCloseStream = false
             });
+        }
+
+        using var getResponse = await Client.GetObjectAsync(bucket.Name, key);
+        await using var downloadStream = new MemoryStream();
+        await getResponse.ResponseStream.CopyToAsync(downloadStream);
+        var downloadedBytes = downloadStream.ToArray();
+        var downloadedHash = MD5.HashData(downloadedBytes);
+
+        Assert.That(getResponse.HttpStatusCode, Is.EqualTo(System.Net.HttpStatusCode.OK));
+        Assert.That(downloadedBytes.Length, Is.EqualTo(LargeObjectSizeBytes));
+        Assert.That(downloadedHash, Is.EqualTo(originalHash));
+    }
+
+    [Test]
+    public async Task PutAndGetLargeObject_PreservesContent() {
+        await using var bucket = await CreateEphemeralBucketAsync();
+        var key = bucket.TrackKey($"large-object-{Guid.NewGuid():N}.bin");
+
+        var buffer = new byte[LargeObjectSizeBytes];
+        RandomNumberGenerator.Fill(buffer);
+        var originalHash = MD5.HashData(buffer);
+
+        var init = await Client.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest() {
+            BucketName = bucket.Name,
+            Key = key,
+            ContentType = "application/octet-stream"
+        });
+
+        var partSize = 10 * 1024 * 1024;
+        var partETags = new List<PartETag>();
+        try {
+            for (var offset = 0; offset < LargeObjectSizeBytes; offset += partSize) {
+                var size = Math.Min(partSize, LargeObjectSizeBytes - offset);
+                await using var partStream = new MemoryStream(buffer, offset, size, writable: false);
+                var uploadPartResponse = await Client.UploadPartAsync(new UploadPartRequest {
+                    BucketName = bucket.Name,
+                    Key = key,
+                    UploadId = init.UploadId,
+                    PartNumber = (offset / partSize) + 1,
+                    InputStream = partStream,
+                    IsLastPart = (offset + size) >= LargeObjectSizeBytes
+                });
+                partETags.Add(new PartETag(uploadPartResponse.PartNumber ?? 0, uploadPartResponse.ETag));
+            }
+
+            var complete = await Client.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest {
+                BucketName = bucket.Name,
+                Key = key,
+                UploadId = init.UploadId,
+                PartETags = partETags
+            });
+
+            Assert.That(complete.HttpStatusCode, Is.EqualTo(System.Net.HttpStatusCode.OK));
+        }
+        catch (Exception) {
+            await Client.AbortMultipartUploadAsync(new AbortMultipartUploadRequest {
+                BucketName = bucket.Name,
+                Key = key,
+                UploadId = init.UploadId
+            });
+            throw;
         }
 
         using var getResponse = await Client.GetObjectAsync(bucket.Name, key);
@@ -130,58 +192,58 @@ public class ObjectLifecycleTests : S3IntegrationTestBase {
             Options.CreateClientConfig());
 
         var ex = Assert.ThrowsAsync<AmazonS3Exception>(() => rogueClient.GetObjectAsync(bucket.Name, key));
-        Assert.That(ex?.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden).Or.EqualTo(HttpStatusCode.Unauthorized));
+        Assert.That(ex?.StatusCode,
+            Is.EqualTo(HttpStatusCode.Forbidden).Or.EqualTo(HttpStatusCode.Unauthorized));
         Assert.That(ex?.ErrorCode, Is.EqualTo("AccessDenied"));
     }
 
     [Test]
     public async Task MultipartUpload_CompletesAndIsReadable() {
-        const int partSize = 5 * 1024 * 1024;
-        const int partCount = 2;
+        const int partSize = 12 * 1024 * 1024;
+        const int partCount = 5;
 
         await using var bucket = await CreateEphemeralBucketAsync();
         var key = bucket.TrackKey($"multipart-object-{Guid.NewGuid():N}.bin");
-
-        var initResponse = await Client.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest {
+        var dataBuffer = new MemoryStream(partSize * partCount);
+        var uploadId = (await Client.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest {
             BucketName = bucket.Name,
             Key = key,
             ContentType = "application/octet-stream"
-        });
+        })).UploadId;
 
-        using var dataBuffer = new MemoryStream(partSize * partCount);
-        var partEtags = new List<PartETag>(partCount);
-
+        var partETags = new List<PartETag>();
         try {
             for (var partNumber = 1; partNumber <= partCount; partNumber++) {
-                var buffer = new byte[partSize];
-                RandomNumberGenerator.Fill(buffer);
-                dataBuffer.Write(buffer, 0, buffer.Length);
+                var partData = new byte[partSize];
+                RandomNumberGenerator.Fill(partData);
+                await dataBuffer.WriteAsync(partData, 0, partSize);
+                await using var partStream = new MemoryStream(partData, writable: false);
 
-                await using var partStream = new MemoryStream(buffer, writable: false);
-                var uploadResponse = await Client.UploadPartAsync(new UploadPartRequest {
+                var uploadPartResponse = await Client.UploadPartAsync(new UploadPartRequest {
                     BucketName = bucket.Name,
                     Key = key,
-                    UploadId = initResponse.UploadId,
+                    UploadId = uploadId,
                     PartNumber = partNumber,
-                    PartSize = buffer.Length,
-                    InputStream = partStream
+                    InputStream = partStream,
+                    IsLastPart = partNumber == partCount
                 });
 
-                partEtags.Add(new PartETag(partNumber, uploadResponse.ETag));
+                partETags.Add(new PartETag(partNumber, uploadPartResponse.ETag));
             }
 
-            await Client.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest {
+            var completeResponse = await Client.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest {
                 BucketName = bucket.Name,
                 Key = key,
-                UploadId = initResponse.UploadId,
-                PartETags = partEtags
+                UploadId = uploadId,
+                PartETags = partETags
             });
+            Assert.That(completeResponse.HttpStatusCode, Is.EqualTo(HttpStatusCode.OK));
         }
-        catch {
+        catch (Exception) {
             await Client.AbortMultipartUploadAsync(new AbortMultipartUploadRequest {
                 BucketName = bucket.Name,
                 Key = key,
-                UploadId = initResponse.UploadId
+                UploadId = uploadId
             });
             throw;
         }
@@ -208,14 +270,14 @@ public class ObjectLifecycleTests : S3IntegrationTestBase {
         });
 
         var expectedTags = new List<Tag> {
-            new() {Key = "env", Value = "integration"},
-            new() {Key = "feature", Value = "tags"}
+            new() { Key = "env", Value = "integration" },
+            new() { Key = "feature", Value = "tags" }
         };
 
         await Client.PutObjectTaggingAsync(new PutObjectTaggingRequest {
             BucketName = bucket.Name,
             Key = key,
-            Tagging = new Tagging {TagSet = expectedTags}
+            Tagging = new Tagging { TagSet = expectedTags }
         });
 
         var tagResponse = await Client.GetObjectTaggingAsync(new GetObjectTaggingRequest {

@@ -210,8 +210,8 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
         if (ids.Length == 0) return;
 
         var client = _discordClients[Random.Shared.Next(_discordClients.Length)];
-    _metrics.RecordDiscordRequest();
-    var messageChannel = await client.GetChannelAsync(channel) as IMessageChannel;
+        _metrics.RecordDiscordRequest();
+        var messageChannel = await client.GetChannelAsync(channel) as IMessageChannel;
         if (messageChannel is null) {
             _logger.LogWarning("Channel with ID {ChannelId} not found for bulk delete", channel);
             return;
@@ -221,10 +221,14 @@ public class DiscordMultiplexer : IDiscordService, IAsyncDisposable {
             _metrics.RecordDiscordRequest();
             await messageChannel.DeleteMessageAsync(id, options: new RequestOptions { CancelToken = ct, RetryMode = RetryMode.AlwaysRetry});
         }
+
+        _logger.LogInformation("Deleted {MessageCount} Discord messages from channel {ChannelId}", ids.Length,
+            channel);
     }
 
     public async ValueTask DisposeAsync() {
         _isReady = false;
+        if (_discordClients is null) return;
         foreach (var client in _discordClients) {
             if (client is not null) {
                 try {

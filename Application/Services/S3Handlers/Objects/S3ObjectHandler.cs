@@ -51,13 +51,13 @@ public class S3ObjectHandler : IS3ObjectHandler {
         }
 
         var isLatest = true;
-    var latestVersion = (await _db.Objects.ReadObjectLatestMetadataAsync(bucket.Id, md.Obj.Key))?.Version;
+        var latestVersion = (await _db.Objects.ReadObjectLatestMetadataAsync(bucket.Id, md.Obj.Key))?.Version;
         if (md.Obj.Version < latestVersion) isLatest = false;
 
         var user = await _db.Users.ReadUserByIdAsync(md.Obj.OwnerId);
         var owner = user is not null ? new Owner(user.Id, user.Name) : null;
 
-    var stream = await _bucketStore.GetObjectStreamAsync(bucket, md.Obj, ctx.Http.Token);
+        var stream = await _bucketStore.GetObjectStreamAsync(bucket, md.Obj, ctx.Http.Token);
 
         if (md.Obj.IsEncrypted) {
             try {
@@ -84,58 +84,44 @@ public class S3ObjectHandler : IS3ObjectHandler {
         EnsureAuthorized(md, ctx, "object write");
         var bucket = RequireBucket(md, ctx, "object write");
 
-        var obj = await _db.Objects.ReadObjectLatestMetadataAsync(
-            bucket.Id, ctx.Request.Key);
-        if (obj is not null && !bucket.EnableVersioning) {
-            _logger.LogWarning("Versioning is disabled for bucket {Bucket}, prohibiting write to {Key}",
-                ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.InvalidBucketState));
-        }
+        _logger.LogInformation(
+            "Write handler dispatched for {Method} {Uri} (request type {RequestType}, uploadId {UploadId}, partNumber {PartNumber})",
+            ctx.Http.Request.Method, ctx.Http.Request.Url.Full, ctx.Request.RequestType, ctx.Request.UploadId,
+            ctx.Request.PartNumber);
+
+        var existingObject =
+            await _db.Objects.ReadObjectLatestMetadataAsync(bucket.Id, ctx.Request.Key, ctx.Http.Token);
+        var replaceCurrent = existingObject is not null && !bucket.EnableVersioning;
 
         #region Populate-Metadata
 
-        if (obj is null) {
-            // new object 
-            obj = new Object();
-
-            SetUser(md.User);
-
-            obj.BucketId = bucket.Id;
-            obj.Version = 1;
-            obj.BlobFilename = obj.Id;
-            obj.ContentLength = ctx.Http.Request.ContentLength;
-            obj.ContentType = ctx.Http.Request.ContentType;
-            obj.DeleteMarker = false;
-            obj.ExpirationUtc = null;
-            obj.Key = ctx.Request.Key;
-
-            if (obj.ContentLength == 0 && obj.Key.EndsWith('/')) obj.IsFolder = true;
-        }
-        else {
-            // new version  
-            SetUser(md.User);
-
-            obj.Id = Guid.NewGuid().ToString();
-            obj.BucketId = bucket.Id;
-            obj.Version += 1;
-            obj.BlobFilename = obj.Id;
-            obj.ContentLength = ctx.Http.Request.ContentLength;
-            obj.ContentType = ctx.Http.Request.ContentType;
-            obj.DeleteMarker = false;
-            obj.ExpirationUtc = null;
-            obj.Key = ctx.Request.Key;
-        }
-
-        void SetUser(User? user) {
+        void PopulateUserMetadata(User? user, Object target) {
             if (user is not null) {
-                obj.AuthorId = user.Id;
-                obj.OwnerId = user.Id;
+                target.AuthorId = user.Id;
+                target.OwnerId = user.Id;
             }
             else {
-                obj.AuthorId = $"{ctx.Http.Request.Source.IpAddress}:{ctx.Http.Request.Source.Port}";
-                obj.OwnerId = $"{ctx.Http.Request.Source.IpAddress}:{ctx.Http.Request.Source.Port}";
+                var source = ctx.Http.Request.Source;
+                var fallback = $"{source.IpAddress}:{source.Port}";
+                target.AuthorId = fallback;
+                target.OwnerId = fallback;
             }
         }
+
+        var obj = new Object();
+
+        PopulateUserMetadata(md.User, obj);
+
+        obj.BucketId = bucket.Id;
+        obj.Version = existingObject is null ? 1 : existingObject.Version + 1;
+        obj.BlobFilename = obj.Id;
+        obj.ContentLength = ctx.Http.Request.ContentLength;
+        obj.ContentType = ctx.Http.Request.ContentType;
+        obj.DeleteMarker = false;
+        obj.ExpirationUtc = null;
+        obj.Key = ctx.Request.Key;
+
+        if (obj.ContentLength == 0 && obj.Key.EndsWith('/')) obj.IsFolder = true;
 
         #endregion
 
@@ -157,7 +143,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         long totalLength = 0;
 
         try {
-            await using (FileStream fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write, FileShare.None)) {
+            await using (FileStream fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write,
+                             FileShare.None)) {
                 if (ctx.Request.Chunked) {
                     while (true) {
                         Chunk chunk = await ctx.Request.ReadChunk();
@@ -196,6 +183,9 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
         obj.ContentLength = totalLength;
 
+        _logger.LogInformation("Persisting single-request object for {Bucket}/{Key} version {Version} with {Length} bytes (replace: {ReplaceCurrent})",
+            ctx.Request.Bucket, ctx.Request.Key, obj.Version, obj.ContentLength, replaceCurrent);
+
         EncryptionOutcome? encryptionOutcome = null;
         try {
             encryptionOutcome = await PersistObjectAsync(ctx, md, obj, tempFilePath, encryptionRequest);
@@ -212,6 +202,10 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
         await ApplyAclHeadersAsync(ctx, md, obj);
 
+        if (replaceCurrent && existingObject is not null) {
+            await CleanupReplacedObjectAsync(ctx, bucket, existingObject);
+        }
+
         if (!string.IsNullOrWhiteSpace(obj.Etag)) {
             ctx.Response.Headers["ETag"] = $"\"{obj.Etag.ToLowerInvariant()}\"";
         }
@@ -220,7 +214,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
     private RequestMetadata RequireMetadata(S3Context ctx, string operation) {
         if (ctx.Metadata is RequestMetadata md && md is not null) return md;
 
-        _logger.LogWarning("Request metadata is null during {Operation} for request {@Request}", operation, ctx.Request);
+        _logger.LogWarning("Request metadata is null during {Operation} for request {@Request}", operation,
+            ctx.Request);
         throw new S3Exception(new Error(ErrorCode.InternalError));
     }
 
@@ -228,7 +223,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         if (md.Authorization != EAuthorizationResult.NotAuthorized) return;
 
         if (!string.IsNullOrWhiteSpace(ctx.Request.Key)) {
-            _logger.LogWarning("Unauthorized {Operation} for bucket {Bucket} and key {Key}", operation, ctx.Request.Bucket,
+            _logger.LogWarning("Unauthorized {Operation} for bucket {Bucket} and key {Key}", operation,
+                ctx.Request.Bucket,
                 ctx.Request.Key);
         }
         else {
@@ -245,7 +241,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
     }
 
-    private async Task<EncryptionOutcome?> PersistObjectAsync(S3Context ctx, RequestMetadata md, Object obj, string plaintextFilePath,
+    private async Task<EncryptionOutcome?> PersistObjectAsync(S3Context ctx, RequestMetadata md, Object obj,
+        string plaintextFilePath,
         EncryptionRequest? encryptionRequest) {
         ArgumentNullException.ThrowIfNull(ctx);
         ArgumentNullException.ThrowIfNull(md);
@@ -259,14 +256,19 @@ public class S3ObjectHandler : IS3ObjectHandler {
         var writeSuccess = false;
 
         try {
+            _logger.LogInformation(
+                "Persisting object {Bucket}/{Key} version {Version} from payload {PayloadPath} (SSE requested: {SseRequested})",
+                ctx.Request.Bucket, ctx.Request.Key, obj.Version, payloadPath, encryptionRequest is not null);
             if (encryptionRequest is not null) {
                 try {
-                    encryptionOutcome = await _encryptionService.EncryptAsync(plaintextFilePath, encryptionRequest, ctx.Http.Token);
+                    encryptionOutcome =
+                        await _encryptionService.EncryptAsync(plaintextFilePath, encryptionRequest, ctx.Http.Token);
                     payloadPath = encryptionOutcome.EncryptedFilePath;
                     ApplyEncryptionOutcome(obj, encryptionOutcome, encryptionRequest);
                 }
                 catch (Exception ex) {
-                    _logger.LogError(ex, "Failed to encrypt object {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
+                    _logger.LogError(ex, "Failed to encrypt object {Bucket}/{Key}", ctx.Request.Bucket,
+                        ctx.Request.Key);
                     throw new S3Exception(new Error(ErrorCode.InternalError));
                 }
             }
@@ -294,10 +296,15 @@ public class S3ObjectHandler : IS3ObjectHandler {
             throw new S3Exception(new Error(ErrorCode.InternalError));
         }
 
+        _logger.LogInformation(
+            "Bucket store accepted object {Bucket}/{Key} version {Version} (content length {Length}, storage length {StorageLength})",
+            ctx.Request.Bucket, ctx.Request.Key, obj.Version, obj.ContentLength, obj.StorageContentLength);
+
         return encryptionOutcome;
     }
 
-    private async Task HandleCopyAsync(S3Context ctx, RequestMetadata md, Object obj, string copySourceHeader, EncryptionRequest? encryptionRequest) {
+    private async Task HandleCopyAsync(S3Context ctx, RequestMetadata md, Object obj, string copySourceHeader,
+        EncryptionRequest? encryptionRequest) {
         ArgumentNullException.ThrowIfNull(ctx);
         ArgumentNullException.ThrowIfNull(md);
         ArgumentNullException.ThrowIfNull(obj);
@@ -313,7 +320,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
             throw new S3Exception(new Error(ErrorCode.InvalidArgument));
         }
 
-    var sourceBucketName = System.Uri.UnescapeDataString(trimmed[..separatorIndex]);
+        var sourceBucketName = System.Uri.UnescapeDataString(trimmed[..separatorIndex]);
         var sourceKeySegment = trimmed[(separatorIndex + 1)..];
         string? versionIdQuery = null;
         var queryIndex = sourceKeySegment.IndexOf('?');
@@ -366,7 +373,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         if (versionId.HasValue) {
             sourceObject = await objectQuery.FirstOrDefaultAsync(o => o.Version == versionId.Value, ctx.Http.Token);
             if (sourceObject is null) {
-                _logger.LogWarning("Copy source version {Version} not found for {Bucket}/{Key}", versionId.Value, sourceBucketName, sourceKey);
+                _logger.LogWarning("Copy source version {Version} not found for {Bucket}/{Key}", versionId.Value,
+                    sourceBucketName, sourceKey);
                 throw new S3Exception(new Error(ErrorCode.NoSuchVersion));
             }
         }
@@ -396,7 +404,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         var tempPlaintextPath = Path.Combine(tempDirectory, Ulid.NewUlid().ToString());
 
         try {
-            await using var sourceStream = await _bucketStore.GetObjectStreamAsync(sourceBucket, sourceObject, ctx.Http.Token);
+            await using var sourceStream =
+                await _bucketStore.GetObjectStreamAsync(sourceBucket, sourceObject, ctx.Http.Token);
             Stream payloadStream = sourceStream;
             Stream? decryptedStream = null;
 
@@ -406,7 +415,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
                     payloadStream = decryptedStream;
                 }
 
-                await using var fs = new FileStream(tempPlaintextPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                await using var fs = new FileStream(tempPlaintextPath, FileMode.Create, FileAccess.Write,
+                    FileShare.None);
                 await payloadStream.CopyToAsync(fs, ctx.Http.Token);
             }
             finally {
@@ -459,11 +469,13 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
         if (md.Obj is null) {
             if (versionId == 1) {
-                _logger.LogWarning("Object not found for bucket {Bucket} and key {Key}", ctx.Request.Bucket, ctx.Request.Key);
-                throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+                _logger.LogInformation("Delete accepted for missing object {Bucket}/{Key}", ctx.Request.Bucket,
+                    ctx.Request.Key);
+                return;
             }
 
-            _logger.LogWarning("Object version {VersionId} not found for bucket {Bucket} and key {Key}", versionId, ctx.Request.Bucket, ctx.Request.Key);
+            _logger.LogWarning("Object version {VersionId} not found for bucket {Bucket} and key {Key}", versionId,
+                ctx.Request.Bucket, ctx.Request.Key);
             throw new S3Exception(new Error(ErrorCode.NoSuchVersion));
         }
 
@@ -485,6 +497,119 @@ public class S3ObjectHandler : IS3ObjectHandler {
         await _bucketStore.DeleteObjectVersionAsync(bucket, md.Obj, versionId, ctx.Http.Token);
         await _db.ObjectAcls.DeleteObjectVersionAclAsync(bucket.Id, md.Obj.Id, versionId);
         await _db.ObjectTags.DeleteObjectVersionTagsAsync(bucket.Id, md.Obj.Id, versionId);
+    }
+
+    public async Task<Tagging> ReadTags(S3Context ctx) {
+        ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
+        var md = RequireMetadata(ctx, "object tag read");
+        EnsureAuthorized(md, ctx, "object tag read");
+        RequireBucket(md, ctx, "object tag read");
+
+        if (md.Obj is null) {
+            _logger.LogWarning("Object not found for tag read {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
+            throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+        }
+
+        if (md.Obj.DeleteMarker) {
+            ctx.Response.Headers.Add(Constants.Headers.DeleteMarker, "true");
+            throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+        }
+
+        var cancellation = ctx.Http.Token;
+
+        var objectTags = await _db.ObjectTags
+            .AsNoTracking()
+            .Where(t => t.ObjectId == md.Obj.Id)
+            .OrderBy(t => t.Key)
+            .ToListAsync(cancellation);
+
+        var tags = objectTags.Count == 0
+            ? new List<Tag>()
+            : objectTags.Select(t => new Tag(t.Key, t.Value)).ToList();
+
+        return new Tagging(new TagSet(tags));
+    }
+
+    public async Task WriteTags(S3Context ctx, Tagging tagging) {
+        ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
+        var md = RequireMetadata(ctx, "object tag write");
+        EnsureAuthorized(md, ctx, "object tag write");
+        var bucket = RequireBucket(md, ctx, "object tag write");
+
+        if (md.Obj is null) {
+            _logger.LogWarning("Object not found for tag write {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
+            throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+        }
+
+        if (md.Obj.DeleteMarker) {
+            ctx.Response.Headers.Add(Constants.Headers.DeleteMarker, "true");
+            throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+        }
+
+        var cancellation = ctx.Http.Token;
+
+        var existing = await _db.ObjectTags
+            .AsTracking()
+            .Where(t => t.ObjectId == md.Obj.Id)
+            .ToListAsync(cancellation);
+        if (existing.Count > 0) _db.ObjectTags.RemoveRange(existing);
+
+        var incomingTags = tagging?.Tags?.Tags ?? new List<Tag>();
+        var uniqueTags = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var tag in incomingTags) {
+            if (tag is null) continue;
+            if (string.IsNullOrWhiteSpace(tag.Key)) {
+                _logger.LogWarning("Rejecting object tag write with empty key for {Bucket}/{Key}", ctx.Request.Bucket,
+                    ctx.Request.Key);
+                throw new S3Exception(new Error(ErrorCode.InvalidArgument));
+            }
+
+            uniqueTags[tag.Key] = tag.Value ?? string.Empty;
+        }
+
+        if (uniqueTags.Count > 0) {
+            var now = _timeProvider.GetUtcNow();
+            foreach (var kvp in uniqueTags) {
+                _db.ObjectTags.Add(new ObjectTag {
+                    BucketId = bucket.Id,
+                    ObjectId = md.Obj.Id,
+                    Key = kvp.Key,
+                    Value = kvp.Value,
+                    CreatedUtc = now
+                });
+            }
+        }
+
+        await _db.SaveChangesAsync(cancellation);
+    }
+
+    public async Task DeleteTags(S3Context ctx) {
+        ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
+        var md = RequireMetadata(ctx, "object tag delete");
+        EnsureAuthorized(md, ctx, "object tag delete");
+        RequireBucket(md, ctx, "object tag delete");
+
+        if (md.Obj is null) {
+            _logger.LogWarning("Object not found for tag delete {Bucket}/{Key}", ctx.Request.Bucket, ctx.Request.Key);
+            throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+        }
+
+        if (md.Obj.DeleteMarker) {
+            ctx.Response.Headers.Add(Constants.Headers.DeleteMarker, "true");
+            throw new S3Exception(new Error(ErrorCode.NoSuchKey));
+        }
+
+        var cancellation = ctx.Http.Token;
+
+        var existing = await _db.ObjectTags
+            .AsTracking()
+            .Where(t => t.ObjectId == md.Obj.Id)
+            .ToListAsync(cancellation);
+
+        if (existing.Count == 0) return;
+
+        _db.ObjectTags.RemoveRange(existing);
+        await _db.SaveChangesAsync(cancellation);
     }
 
     private async Task ApplyAclHeadersAsync(S3Context ctx, RequestMetadata md, Object obj) {
@@ -568,6 +693,27 @@ public class S3ObjectHandler : IS3ObjectHandler {
         await _db.SaveChangesAsync(ctx.Http.Token);
     }
 
+    private async Task CleanupReplacedObjectAsync(S3Context ctx, Domain.Entities.Bucket bucket, Object previous) {
+        ArgumentNullException.ThrowIfNull(ctx);
+        ArgumentNullException.ThrowIfNull(bucket);
+        ArgumentNullException.ThrowIfNull(previous);
+
+        try {
+            await _db.ObjectAcls.DeleteObjectVersionAclAsync(bucket.Id, previous.Id, previous.Version, ctx.Http.Token);
+            await _db.ObjectTags.DeleteObjectVersionTagsAsync(bucket.Id, previous.Id, previous.Version, ctx.Http.Token);
+            await _bucketStore.DeleteObjectVersionAsync(bucket, previous, previous.Version, ctx.Http.Token);
+        }
+        catch (S3Exception) {
+            throw;
+        }
+        catch (Exception ex) {
+            _logger.LogError(ex,
+                "Failed to cleanup previous object version {Bucket}/{Key} version {Version}",
+                ctx.Request.Bucket, ctx.Request.Key, previous.Version);
+            throw new S3Exception(new Error(ErrorCode.InternalError));
+        }
+    }
+
     private EncryptionRequest? ResolveEncryptionRequest(NameValueCollection headers) {
         if (headers is null || headers.Count == 0) return null;
 
@@ -586,7 +732,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         var algorithm = headers[Constants.Headers.ServerSideEncryption];
         if (string.IsNullOrWhiteSpace(algorithm)) return null;
 
-        if (!string.Equals(algorithm, Constants.EncryptionAlgorithms.Aes256, System.StringComparison.OrdinalIgnoreCase)) {
+        if (!string.Equals(algorithm, Constants.EncryptionAlgorithms.Aes256,
+                System.StringComparison.OrdinalIgnoreCase)) {
             _logger.LogWarning("Unsupported SSE algorithm {Algorithm} requested", algorithm);
             throw new S3Exception(new Error(ErrorCode.InvalidArgument));
         }
@@ -630,15 +777,18 @@ public class S3ObjectHandler : IS3ObjectHandler {
         var algorithm = upload.EncryptionAlgorithm;
         if (string.IsNullOrWhiteSpace(algorithm)) algorithm = Constants.EncryptionAlgorithms.Aes256;
 
-        if (!string.Equals(algorithm, Constants.EncryptionAlgorithms.Aes256, System.StringComparison.OrdinalIgnoreCase)) {
+        if (!string.Equals(algorithm, Constants.EncryptionAlgorithms.Aes256,
+                System.StringComparison.OrdinalIgnoreCase)) {
             _logger.LogWarning("Unsupported multipart SSE algorithm {Algorithm} requested", algorithm);
             throw new S3Exception(new Error(ErrorCode.InvalidArgument));
         }
 
-        return new EncryptionRequest(Constants.EncryptionAlgorithms.Aes256, upload.EncryptionKeyId, upload.EncryptionContext);
+        return new EncryptionRequest(Constants.EncryptionAlgorithms.Aes256, upload.EncryptionKeyId,
+            upload.EncryptionContext);
     }
 
-    private (string Id, string DisplayName) ResolveActor(RequestMetadata md, S3Context ctx, MultipartUpload? upload = null) {
+    private (string Id, string DisplayName) ResolveActor(RequestMetadata md, S3Context ctx,
+        MultipartUpload? upload = null) {
         if (md.User is not null) return (md.User.Id, md.User.Name);
 
         if (upload is not null) return (upload.OwnerId, upload.OwnerDisplayName);
@@ -656,9 +806,12 @@ public class S3ObjectHandler : IS3ObjectHandler {
             throw new S3Exception(new Error(ErrorCode.NoSuchUpload));
         }
 
-    var upload = await _db.MultipartUploads.ReadMultipartUploadAsync(bucket.Id, ctx.Request.Key, ctx.Request.UploadId, ctx.Http.Token);
+        var upload =
+            await _db.MultipartUploads.ReadMultipartUploadAsync(bucket.Id, ctx.Request.Key, ctx.Request.UploadId,
+                ctx.Http.Token);
         if (upload is null || upload.IsAborted) {
-            _logger.LogWarning("Multipart upload {UploadId} not found for bucket {Bucket} and key {Key}", ctx.Request.UploadId, ctx.Request.Bucket, ctx.Request.Key);
+            _logger.LogWarning("Multipart upload {UploadId} not found for bucket {Bucket} and key {Key}",
+                ctx.Request.UploadId, ctx.Request.Bucket, ctx.Request.Key);
             throw new S3Exception(new Error(ErrorCode.NoSuchUpload));
         }
 
@@ -736,7 +889,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
             EncryptionContext = encryptionRequest?.Context
         };
 
-    upload.UploadDirectory = Path.Combine(Constants.File.TempDir, "multipart", bucket.Id, upload.Id);
+        upload.UploadDirectory = Path.Combine(Constants.File.TempDir, "multipart", bucket.Id, upload.Id);
         EnsureUploadDirectory(upload);
 
         _db.MultipartUploads.Add(upload);
@@ -746,6 +899,10 @@ public class S3ObjectHandler : IS3ObjectHandler {
             ctx.Response.Headers[Constants.Headers.ServerSideEncryption] = encryptionRequest.Algorithm;
         }
 
+        _logger.LogInformation(
+            "Multipart upload initiated for {Bucket}/{Key} with upload ID {UploadId}. SSE enabled: {SseEnabled}",
+            ctx.Request.Bucket, ctx.Request.Key, upload.Id, encryptionRequest is not null);
+
         return new InitiateMultipartUploadResult(ctx.Request.Bucket, ctx.Request.Key, upload.Id);
     }
 
@@ -754,10 +911,15 @@ public class S3ObjectHandler : IS3ObjectHandler {
         var md = RequireMetadata(ctx, "multipart upload-part");
         EnsureAuthorized(md, ctx, "multipart upload-part");
 
+        _logger.LogInformation(
+            "UploadPart handler dispatched for {Method} {Uri} (uploadId {UploadId}, partNumber {PartNumber})",
+            ctx.Http.Request.Method, ctx.Http.Request.Url.Full, ctx.Request.UploadId, ctx.Request.PartNumber);
+
         var upload = await GetMultipartUploadAsync(ctx, md);
         var partNumber = ctx.Request.PartNumber;
         if (partNumber <= 0) {
-            _logger.LogWarning("Invalid part number {PartNumber} for upload {UploadId}", partNumber, ctx.Request.UploadId);
+            _logger.LogWarning("Invalid part number {PartNumber} for upload {UploadId}", partNumber,
+                ctx.Request.UploadId);
             throw new S3Exception(new Error(ErrorCode.InvalidArgument));
         }
 
@@ -783,7 +945,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
             else if (ctx.Request.Data != null) {
                 var buffer = new byte[65536];
                 while (true) {
-                    var bytesRead = await ctx.Request.Data.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                    var bytesRead =
+                        await ctx.Request.Data.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
                     if (bytesRead <= 0) break;
 
                     await fs.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
@@ -803,7 +966,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
             etag = Convert.ToHexString(await MD5.HashDataAsync(readStream, cancellationToken));
         }
         catch (Exception ex) {
-            _logger.LogError(ex, "Failed to compute checksum for multipart part {Bucket}/{Key} upload {UploadId} part {PartNumber}",
+            _logger.LogError(ex,
+                "Failed to compute checksum for multipart part {Bucket}/{Key} upload {UploadId} part {PartNumber}",
                 ctx.Request.Bucket, ctx.Request.Key, ctx.Request.UploadId, partNumber);
             throw new S3Exception(new Error(ErrorCode.InternalError));
         }
@@ -834,6 +998,10 @@ public class S3ObjectHandler : IS3ObjectHandler {
         await _db.SaveChangesAsync(cancellationToken);
 
         ctx.Response.Headers["ETag"] = $"\"{etag.ToLowerInvariant()}\"";
+
+        _logger.LogInformation(
+            "Stored multipart part {PartNumber} ({Length} bytes) for {Bucket}/{Key} upload {UploadId}",
+            partNumber, totalLength, ctx.Request.Bucket, ctx.Request.Key, ctx.Request.UploadId);
     }
 
     public async Task<ListPartsResult> ReadParts(S3Context ctx) {
@@ -856,7 +1024,9 @@ public class S3ObjectHandler : IS3ObjectHandler {
         var resultParts = new List<Part>(selectedParts.Count);
         foreach (var part in selectedParts) {
             if (part.Size > int.MaxValue) {
-                _logger.LogWarning("Multipart part size exceeds supported range for upload {UploadId} part {PartNumber}", upload.Id, part.PartNumber);
+                _logger.LogWarning(
+                    "Multipart part size exceeds supported range for upload {UploadId} part {PartNumber}", upload.Id,
+                    part.PartNumber);
                 throw new S3Exception(new Error(ErrorCode.InvalidPart));
             }
 
@@ -883,15 +1053,17 @@ public class S3ObjectHandler : IS3ObjectHandler {
         };
     }
 
-    public async Task<CompleteMultipartUploadResult> CompleteMultipartUpload(S3Context ctx, CompleteMultipartUpload request) {
+    public async Task<CompleteMultipartUploadResult> CompleteMultipartUpload(S3Context ctx,
+        CompleteMultipartUpload request) {
         ArgumentNullException.ThrowIfNull(ctx, nameof(ctx));
         ArgumentNullException.ThrowIfNull(request, nameof(request));
-    var md = RequireMetadata(ctx, "multipart complete");
-    EnsureAuthorized(md, ctx, "multipart complete");
-    var bucket = RequireBucket(md, ctx, "multipart complete");
+        var md = RequireMetadata(ctx, "multipart complete");
+        EnsureAuthorized(md, ctx, "multipart complete");
+        var bucket = RequireBucket(md, ctx, "multipart complete");
 
         if (request.Parts is null || request.Parts.Count == 0) {
-            _logger.LogWarning("Multipart completion request missing parts for upload {UploadId}", ctx.Request.UploadId);
+            _logger.LogWarning("Multipart completion request missing parts for upload {UploadId}",
+                ctx.Request.UploadId);
             throw new S3Exception(new Error(ErrorCode.InvalidPart));
         }
 
@@ -899,7 +1071,9 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
         var completionEncryptionRequest = ResolveEncryptionRequest(ctx.Http.Request.Headers);
         if (completionEncryptionRequest is not null && !upload.UseServerSideEncryption) {
-            _logger.LogWarning("Multipart completion attempted to enable SSE for upload {UploadId} without prior negotiation", upload.Id);
+            _logger.LogWarning(
+                "Multipart completion attempted to enable SSE for upload {UploadId} without prior negotiation",
+                upload.Id);
             throw new S3Exception(new Error(ErrorCode.InvalidRequest));
         }
 
@@ -917,7 +1091,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         }
 
         if (upload.Parts.Count != orderedRequestParts.Count) {
-            _logger.LogWarning("Multipart completion mismatch for upload {UploadId}: provided {Provided} parts but stored {Stored}",
+            _logger.LogWarning(
+                "Multipart completion mismatch for upload {UploadId}: provided {Provided} parts but stored {Stored}",
                 upload.Id, orderedRequestParts.Count, upload.Parts.Count);
             throw new S3Exception(new Error(ErrorCode.InvalidPart));
         }
@@ -935,14 +1110,20 @@ public class S3ObjectHandler : IS3ObjectHandler {
             }
         }
 
+        _logger.LogInformation(
+            "Completing multipart upload {UploadId} for {Bucket}/{Key} with {PartCount} parts",
+            upload.Id, ctx.Request.Bucket, ctx.Request.Key, orderedRequestParts.Count);
+
         var finalFilePath = Path.Combine(upload.UploadDirectory, $"{upload.Id}.final");
         long totalLength = 0;
 
         try {
-            await using var finalStream = new FileStream(finalFilePath, FileMode.Create, FileAccess.Write, FileShare.None);
+            await using var finalStream =
+                new FileStream(finalFilePath, FileMode.Create, FileAccess.Write, FileShare.None);
             foreach (var part in orderedRequestParts) {
                 var storedPart = partsByNumber[part.PartNumber];
-                await using var partStream = new FileStream(storedPart.TempFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                await using var partStream = new FileStream(storedPart.TempFilePath, FileMode.Open, FileAccess.Read,
+                    FileShare.Read);
                 await partStream.CopyToAsync(finalStream, ctx.Http.Token);
                 totalLength += storedPart.Size;
             }
@@ -953,12 +1134,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
             throw new S3Exception(new Error(ErrorCode.InternalError));
         }
 
-    var latestObject = await _db.Objects.ReadObjectLatestMetadataAsync(bucket.Id, upload.Key, ctx.Http.Token);
-    if (latestObject is not null && !bucket.EnableVersioning) {
-            _logger.LogWarning("Versioning disabled for bucket {Bucket}; cannot complete multipart upload for existing object {Key}",
-                ctx.Request.Bucket, ctx.Request.Key);
-            throw new S3Exception(new Error(ErrorCode.InvalidBucketState));
-        }
+        var latestObject = await _db.Objects.ReadObjectLatestMetadataAsync(bucket.Id, upload.Key, ctx.Http.Token);
+        var replaceCurrent = latestObject is not null && !bucket.EnableVersioning;
 
         var (actorId, _) = ResolveActor(md, ctx, upload);
         var obj = new Object {
@@ -966,7 +1143,9 @@ public class S3ObjectHandler : IS3ObjectHandler {
             AuthorId = actorId,
             OwnerId = actorId,
             Key = upload.Key,
-            ContentType = string.IsNullOrWhiteSpace(upload.ContentType) ? "application/octet-stream" : upload.ContentType,
+            ContentType = string.IsNullOrWhiteSpace(upload.ContentType)
+                ? "application/octet-stream"
+                : upload.ContentType,
             ContentLength = totalLength,
             DeleteMarker = false,
             ExpirationUtc = null,
@@ -977,9 +1156,9 @@ public class S3ObjectHandler : IS3ObjectHandler {
         obj.IsFolder = obj.ContentLength == 0 && obj.Key.EndsWith('/');
         obj.Version = latestObject is null ? 1 : latestObject.Version + 1;
 
-    var uploadEncryptionRequest = BuildEncryptionRequest(upload);
+        var uploadEncryptionRequest = BuildEncryptionRequest(upload);
 
-    EncryptionOutcome? encryptionOutcome = null;
+        EncryptionOutcome? encryptionOutcome = null;
 
         try {
             encryptionOutcome = await PersistObjectAsync(ctx, md, obj, finalFilePath, uploadEncryptionRequest);
@@ -995,7 +1174,15 @@ public class S3ObjectHandler : IS3ObjectHandler {
             ctx.Response.Headers[Constants.Headers.ServerSideEncryption] = uploadEncryptionRequest.Algorithm;
         }
 
+        _logger.LogInformation(
+            "Multipart upload {UploadId} persisted as version {Version} for {Bucket}/{Key} ({Length} bytes)",
+            upload.Id, obj.Version, ctx.Request.Bucket, ctx.Request.Key, obj.ContentLength);
+
         await ApplyAclHeadersAsync(ctx, md, obj);
+
+        if (replaceCurrent && latestObject is not null) {
+            await CleanupReplacedObjectAsync(ctx, bucket, latestObject);
+        }
 
         foreach (var storedPart in upload.Parts) {
             DeleteFileIfExists(storedPart.TempFilePath);
@@ -1006,6 +1193,9 @@ public class S3ObjectHandler : IS3ObjectHandler {
         await _db.SaveChangesAsync(ctx.Http.Token);
 
         SafeDeleteDirectory(upload.UploadDirectory);
+
+        _logger.LogInformation("Multipart upload {UploadId} finalized for {Bucket}/{Key}", upload.Id,
+            ctx.Request.Bucket, ctx.Request.Key);
 
         var etagHeader = string.IsNullOrEmpty(obj.Etag) ? null : $"\"{obj.Etag.ToLowerInvariant()}\"";
         if (!string.IsNullOrEmpty(etagHeader)) ctx.Response.Headers["ETag"] = etagHeader;
@@ -1034,5 +1224,8 @@ public class S3ObjectHandler : IS3ObjectHandler {
         await _db.SaveChangesAsync(ctx.Http.Token);
 
         SafeDeleteDirectory(upload.UploadDirectory);
+
+        _logger.LogInformation("Aborted multipart upload {UploadId} for {Bucket}/{Key}; removed {PartCount} parts",
+            upload.Id, ctx.Request.Bucket, ctx.Request.Key, upload.Parts.Count);
     }
 }

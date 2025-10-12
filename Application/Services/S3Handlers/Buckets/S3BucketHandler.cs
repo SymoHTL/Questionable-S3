@@ -443,6 +443,117 @@ public class S3BucketHandler : IS3BucketHandler {
             md.Bucket.RegionString);
     }
 
+    public async Task<Tagging> ReadTags(S3Context ctx) {
+        ArgumentNullException.ThrowIfNull(ctx);
+
+        if (ctx.Metadata is not RequestMetadata md) {
+            _logger.LogWarning("Missing request metadata for ReadTags on bucket {Bucket}", ctx.Request.Bucket);
+            throw new S3Exception(new Error(ErrorCode.InternalError));
+        }
+
+        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
+            _logger.LogWarning("Unauthorized ReadTags request for bucket {Bucket}", ctx.Request.Bucket);
+            throw new S3Exception(new Error(ErrorCode.AccessDenied));
+        }
+
+        if (md.Bucket is null)
+            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
+
+        var cancellation = ctx.Http.Token;
+
+        var bucketTags = await _db.BucketTags
+            .AsNoTracking()
+            .Where(t => t.BucketId == md.Bucket.Id)
+            .OrderBy(t => t.Key)
+            .ToListAsync(cancellation);
+
+        var tags = bucketTags.Count == 0
+            ? new List<Tag>()
+            : bucketTags.Select(t => new Tag(t.Key, t.Value)).ToList();
+
+        return new Tagging(new TagSet(tags));
+    }
+
+    public async Task WriteTags(S3Context ctx, Tagging tagging) {
+        ArgumentNullException.ThrowIfNull(ctx);
+
+        if (ctx.Metadata is not RequestMetadata md) {
+            _logger.LogWarning("Missing request metadata for WriteTags on bucket {Bucket}", ctx.Request.Bucket);
+            throw new S3Exception(new Error(ErrorCode.InternalError));
+        }
+
+        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
+            _logger.LogWarning("Unauthorized WriteTags request for bucket {Bucket}", ctx.Request.Bucket);
+            throw new S3Exception(new Error(ErrorCode.AccessDenied));
+        }
+
+        if (md.Bucket is null)
+            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
+
+        var cancellation = ctx.Http.Token;
+
+        var existing = await _db.BucketTags
+            .AsTracking()
+            .Where(t => t.BucketId == md.Bucket.Id)
+            .ToListAsync(cancellation);
+        if (existing.Count > 0) _db.BucketTags.RemoveRange(existing);
+
+        var incomingTags = tagging?.Tags?.Tags ?? new List<Tag>();
+        var uniqueTags = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var tag in incomingTags) {
+            if (tag is null) continue;
+            if (string.IsNullOrWhiteSpace(tag.Key)) {
+                _logger.LogWarning("Rejecting bucket tag write with empty key for bucket {Bucket}", ctx.Request.Bucket);
+                throw new S3Exception(new Error(ErrorCode.InvalidArgument));
+            }
+
+            uniqueTags[tag.Key] = tag.Value ?? string.Empty;
+        }
+
+        if (uniqueTags.Count > 0) {
+            var now = _tp.GetUtcNow();
+            foreach (var kvp in uniqueTags) {
+                _db.BucketTags.Add(new BucketTag {
+                    BucketId = md.Bucket.Id,
+                    Key = kvp.Key,
+                    Value = kvp.Value,
+                    CreatedUtc = now
+                });
+            }
+        }
+
+        await _db.SaveChangesAsync(cancellation);
+    }
+
+    public async Task DeleteTags(S3Context ctx) {
+        ArgumentNullException.ThrowIfNull(ctx);
+
+        if (ctx.Metadata is not RequestMetadata md) {
+            _logger.LogWarning("Missing request metadata for DeleteTags on bucket {Bucket}", ctx.Request.Bucket);
+            throw new S3Exception(new Error(ErrorCode.InternalError));
+        }
+
+        if (md.Authorization == EAuthorizationResult.NotAuthorized) {
+            _logger.LogWarning("Unauthorized DeleteTags request for bucket {Bucket}", ctx.Request.Bucket);
+            throw new S3Exception(new Error(ErrorCode.AccessDenied));
+        }
+
+        if (md.Bucket is null)
+            throw new S3Exception(new Error(ErrorCode.NoSuchBucket));
+
+        var cancellation = ctx.Http.Token;
+
+        var existing = await _db.BucketTags
+            .AsTracking()
+            .Where(t => t.BucketId == md.Bucket.Id)
+            .ToListAsync(cancellation);
+
+        if (existing.Count == 0) return;
+
+        _db.BucketTags.RemoveRange(existing);
+        await _db.SaveChangesAsync(cancellation);
+    }
+
     public async Task<AccessControlPolicy> ReadAcl(S3Context ctx) {
         ArgumentNullException.ThrowIfNull(ctx);
 

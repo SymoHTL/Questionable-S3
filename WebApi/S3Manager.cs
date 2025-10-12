@@ -32,6 +32,9 @@ public class S3Manager {
         server.Object.Read = _s3ObjectHandler.Read;
         server.Object.Write = _s3ObjectHandler.Write;
         server.Object.Delete = _s3ObjectHandler.Delete;
+        server.Object.ReadTagging = _s3ObjectHandler.ReadTags;
+        server.Object.WriteTagging = _s3ObjectHandler.WriteTags;
+        server.Object.DeleteTagging = _s3ObjectHandler.DeleteTags;
 
         server.Object.CreateMultipartUpload = _s3ObjectHandler.CreateMultipartUpload;
         server.Object.UploadPart = _s3ObjectHandler.UploadPart;
@@ -42,6 +45,9 @@ public class S3Manager {
         server.Bucket.Write = _s3BucketHandler.Write;
         server.Bucket.Read = _s3BucketHandler.Read;
         server.Bucket.Delete = _s3BucketHandler.Delete;
+        server.Bucket.ReadTagging = _s3BucketHandler.ReadTags;
+        server.Bucket.WriteTagging = _s3BucketHandler.WriteTags;
+        server.Bucket.DeleteTagging = _s3BucketHandler.DeleteTags;
         server.Bucket.Exists = _s3BucketHandler.Exists;
         server.Bucket.ReadVersions = _s3BucketHandler.ReadVersions;
         server.Bucket.ReadAcl = _s3BucketHandler.ReadAcl;

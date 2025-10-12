@@ -43,6 +43,9 @@ public class DiscordBucketStore : IBucketStore {
         if (storageLength <= 0) storageLength = new FileInfo(filePath).Length;
         obj.StorageContentLength = storageLength;
 
+        _logger.LogInformation("Uploading object {BucketId}/{Key} version {Version} to Discord ({Length} bytes)",
+            obj.BucketId, obj.Key, obj.Version, storageLength);
+
         var chunks = await UploadToDiscordAsync(filePath, bucket, obj, storageLength, ct);
 
         if (string.IsNullOrEmpty(obj.Md5)) {
@@ -62,6 +65,9 @@ public class DiscordBucketStore : IBucketStore {
         _db.Objects.Add(obj);
         _db.ObjectChunks.AddRange(chunks);
         var messageIds = chunks.Select(c => c.MessageId).Distinct().ToArray();
+        _logger.LogInformation(
+            "Uploaded object {BucketId}/{Key} as {ChunkCount} chunks across {MessageCount} Discord messages",
+            obj.BucketId, obj.Key, chunks.Count, messageIds.Length);
         foreach (var messageId in messageIds) {
             // refresh each message every 23 hours
             _recurringJobs.AddOrUpdate<DiscordMultiplexer>(Constants.RecurringJobs.FormatObjectRefresh(messageId),
@@ -70,6 +76,9 @@ public class DiscordBucketStore : IBucketStore {
         }
 
         await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Stored object {BucketId}/{Key} version {Version} with {ChunkCount} chunks",
+            obj.BucketId, obj.Key, obj.Version, chunks.Count);
 
         _metrics.RecordIngress(obj.ContentLength);
         _metrics.TrackObjectStored(storageLength);
@@ -101,6 +110,10 @@ public class DiscordBucketStore : IBucketStore {
             throw new InvalidOperationException("Object has no chunks associated with it.");
 
         var messageIds = objectChunks.Select(c => c.MessageId).Distinct().ToArray();
+
+        _logger.LogInformation(
+            "Deleting object {BucketId}/{Key} version {Version}; scheduling removal of {MessageCount} Discord messages",
+            trackedObject.BucketId, trackedObject.Key, trackedObject.Version, messageIds.Length);
 
         var storedBytes = trackedObject.StorageContentLength > 0
             ? trackedObject.StorageContentLength
@@ -217,6 +230,8 @@ public class DiscordBucketStore : IBucketStore {
             new FileAttachment(new ChunkStream(filePath, c.Offset, c.Size),
                 GetChunkFileName(obj, c.Index))).ToArray();
         try {
+            _logger.LogDebug("Uploading Discord chunk group for {BucketId}/{Key} with {ChunkCount} attachments",
+                obj.BucketId, obj.Key, chunks.Count);
             return await ExecuteWithRetryAsync(
                 async () => {
                     _metrics.RecordDiscordRequest();

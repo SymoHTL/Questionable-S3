@@ -10,4 +10,7 @@ public interface IS3BucketHandler {
     Task<ListBucketResult> Read(S3Context ctx);
     Task<ListVersionsResult> ReadVersions(S3Context ctx);
     Task<AccessControlPolicy> ReadAcl(S3Context ctx);
+    Task<Tagging> ReadTags(S3Context ctx);
+    Task WriteTags(S3Context ctx, Tagging tagging);
+    Task DeleteTags(S3Context ctx);
 }
