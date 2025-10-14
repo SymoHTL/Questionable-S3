@@ -10,6 +10,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Application", "Application\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tests", "Tests\Tests.csproj", "{FDDCCC02-9003-43A7-982E-DA8AF8E2E3F2}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StaticS3", "StaticS3\StaticS3.csproj", "{ECD3BB9E-29FD-4212-91D1-B605DF9D21CD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -36,5 +38,9 @@ Global
 		{FDDCCC02-9003-43A7-982E-DA8AF8E2E3F2}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{FDDCCC02-9003-43A7-982E-DA8AF8E2E3F2}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{FDDCCC02-9003-43A7-982E-DA8AF8E2E3F2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{ECD3BB9E-29FD-4212-91D1-B605DF9D21CD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{ECD3BB9E-29FD-4212-91D1-B605DF9D21CD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{ECD3BB9E-29FD-4212-91D1-B605DF9D21CD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{ECD3BB9E-29FD-4212-91D1-B605DF9D21CD}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

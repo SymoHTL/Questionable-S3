@@ -8,14 +8,12 @@ namespace Application.Services.S3Handlers.Settings;
 public class S3SettingsHandler : IS3SettingsHandler {
     private readonly IS3AuthHandler _auth;
     private readonly ILogger<HttpRequestHandler> _httpLogger;
-    private readonly S3ServerSettings _s3Settings;
     private readonly IHealthStatusService _healthStatusService;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     // ReSharper disable once ContextualLoggerProblem
-    public S3SettingsHandler(S3ServerSettings s3Settings, ILogger<HttpRequestHandler> httpLogger,
+    public S3SettingsHandler(ILogger<HttpRequestHandler> httpLogger,
         IS3AuthHandler auth, IHealthStatusService healthStatusService) {
-        _s3Settings = s3Settings;
         _httpLogger = httpLogger;
         _auth = auth;
         _healthStatusService = healthStatusService;
@@ -23,9 +21,9 @@ public class S3SettingsHandler : IS3SettingsHandler {
 
 
     public async Task<bool> PreRequestHandler(S3Context ctx) {
-        if (_s3Settings.Logging.HttpRequests && _httpLogger.IsEnabled(LogLevel.Information))
-            _httpLogger.LogInformation("Request: {Route} {Method} from {Source}",
-                ctx.Http.Request.Url.Full, ctx.Http.Request.Method, ctx.Http.Request.Source);
+        if (_httpLogger.IsEnabled(LogLevel.Information))
+            _httpLogger.LogInformation("Request: {Route} {Method}",
+                ctx.Http.Request.Url.Full, ctx.Http.Request.Method);
 
         if (ctx.Http.Request.Url.Elements.Length == 1) {
             var segment = ctx.Http.Request.Url.Elements[0];
@@ -107,14 +105,15 @@ public class S3SettingsHandler : IS3SettingsHandler {
     }
 
     public Task PostRequestHandler(S3Context ctx) {
-        if (_s3Settings.Logging.HttpRequests && _httpLogger.IsEnabled(LogLevel.Information))
-            _httpLogger.LogInformation("Response: {@Response}", ctx.Response);
+        if (_httpLogger.IsEnabled(LogLevel.Information))
+            _httpLogger.LogInformation("Response: {Route} {Method} - {StatusCode}",
+                ctx.Http.Request.Url.Full, ctx.Http.Request.Method, ctx.Response.StatusCode);
         return Task.CompletedTask;
     }
 
     public async Task DefaultRequestHandler(S3Context ctx) {
-        if (_httpLogger.IsEnabled(LogLevel.Information))
-            _httpLogger.LogInformation("Default request handler invoked for {Route}", ctx.Http.Request.Url.Full);
+        _httpLogger.LogWarning("Default request handler invoked for {Route} - {Method} - {Type}",
+            ctx.Http.Request.Url.Full, ctx.Http.Request.Method, ctx.Request.RequestType);
         await ctx.Response.Send(ErrorCode.InvalidRequest);
     }
 
@@ -156,5 +155,4 @@ public class S3SettingsHandler : IS3SettingsHandler {
 
         return true;
     }
-
 }

@@ -1,7 +1,4 @@
-using System;
-using System.Collections.Generic;
 using System.Net;
-using System.Threading.Tasks;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Amazon.S3.Transfer;

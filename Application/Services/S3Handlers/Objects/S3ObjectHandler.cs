@@ -143,35 +143,34 @@ public class S3ObjectHandler : IS3ObjectHandler {
         long totalLength = 0;
 
         try {
-            await using (FileStream fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write,
-                             FileShare.None)) {
-                if (ctx.Request.Chunked) {
-                    while (true) {
-                        Chunk chunk = await ctx.Request.ReadChunk();
-                        if (chunk == null) break;
+            await using FileStream fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write,
+                FileShare.None);
+            if (ctx.Request.Chunked) {
+                while (true) {
+                    Chunk chunk = await ctx.Request.ReadChunk();
+                    if (chunk == null) break;
 
-                        if (chunk.Data is { Length: > 0 }) {
-                            await fs.WriteAsync(chunk.Data.AsMemory(0, chunk.Data.Length), ctx.Http.Token);
-                            totalLength += chunk.Data.Length;
-                        }
-
-                        if (chunk.IsFinal) break;
-                    }
-                }
-                else if (ctx.Request.Data != null && ctx.Http.Request.ContentLength > 0) {
-                    var bytesRemaining = ctx.Http.Request.ContentLength;
-                    var buffer = new byte[65536];
-
-                    while (bytesRemaining > 0) {
-                        var bytesRead = await ctx.Request.Data.ReadAsync(buffer, ctx.Http.Token);
-                        if (bytesRead <= 0) continue;
-
-                        bytesRemaining -= bytesRead;
-                        await fs.WriteAsync(buffer.AsMemory(0, bytesRead), ctx.Http.Token);
+                    if (chunk.Data is { Length: > 0 }) {
+                        await fs.WriteAsync(chunk.Data.AsMemory(0, chunk.Data.Length), ctx.Http.Token);
+                        totalLength += chunk.Data.Length;
                     }
 
-                    totalLength = ctx.Http.Request.ContentLength;
+                    if (chunk.IsFinal) break;
                 }
+            }
+            else if (ctx.Request.Data != null && ctx.Http.Request.ContentLength > 0) {
+                var bytesRemaining = ctx.Http.Request.ContentLength;
+                var buffer = new byte[65536];
+
+                while (bytesRemaining > 0) {
+                    var bytesRead = await ctx.Request.Data.ReadAsync(buffer, ctx.Http.Token);
+                    if (bytesRead <= 0) continue;
+
+                    bytesRemaining -= bytesRead;
+                    await fs.WriteAsync(buffer.AsMemory(0, bytesRead), ctx.Http.Token);
+                }
+
+                totalLength = ctx.Http.Request.ContentLength;
             }
         }
         catch (Exception e) {
@@ -1215,9 +1214,7 @@ public class S3ObjectHandler : IS3ObjectHandler {
 
         var upload = await GetMultipartUploadAsync(ctx, md);
 
-        foreach (var part in upload.Parts) {
-            DeleteFileIfExists(part.TempFilePath);
-        }
+        foreach (var part in upload.Parts) DeleteFileIfExists(part.TempFilePath);
 
         _db.MultipartUploadParts.RemoveRange(upload.Parts);
         _db.MultipartUploads.Remove(upload);

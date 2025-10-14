@@ -3,6 +3,7 @@ using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Amazon.Runtime;
@@ -103,6 +104,9 @@ public class ObjectLifecycleTests : S3IntegrationTestBase {
             ContentType = "application/octet-stream"
         });
 
+        if (string.IsNullOrEmpty(init.UploadId))
+            Assert.Fail("Failed to initiate multipart upload, missing UploadId");
+        
         var partSize = 10 * 1024 * 1024;
         var partETags = new List<PartETag>();
         try {

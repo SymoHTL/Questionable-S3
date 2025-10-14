@@ -1,23 +1,21 @@
-﻿using Microsoft.Extensions.Hosting;
+﻿using System.ComponentModel;
+using Microsoft.Extensions.Hosting;
+using S3ServerLibrary.S3Objects;
 
 namespace WebApi;
 
 public class S3Manager {
     private readonly ILogger<S3Manager> _logger;
     private readonly S3ServerSettings _s3Settings;
-    private readonly IS3SettingsHandler _s3SettingsHandler;
-    private readonly IS3ObjectHandler _s3ObjectHandler;
-    private readonly IS3BucketHandler _s3BucketHandler;
     private readonly IHostApplicationLifetime _appLifetime;
+    private readonly IServiceScopeFactory _scopeFactory;
 
-    public S3Manager(ILogger<S3Manager> logger, S3ServerSettings s3Settings, IS3SettingsHandler s3SettingsHandler,
-        IS3ObjectHandler s3ObjectHandler, IS3BucketHandler s3BucketHandler, IHostApplicationLifetime appLifetime) {
+    public S3Manager(ILogger<S3Manager> logger, S3ServerSettings s3Settings, IHostApplicationLifetime appLifetime,
+        IServiceScopeFactory scopeFactory) {
         _logger = logger;
         _s3Settings = s3Settings;
-        _s3SettingsHandler = s3SettingsHandler;
-        _s3ObjectHandler = s3ObjectHandler;
-        _s3BucketHandler = s3BucketHandler;
         _appLifetime = appLifetime;
+        _scopeFactory = scopeFactory;
     }
 
     public async Task Run() {
@@ -25,34 +23,34 @@ public class S3Manager {
         using var server = new S3Server(_s3Settings);
         server.Settings.Logger = Log;
 
-        server.Settings.PreRequestHandler = _s3SettingsHandler.PreRequestHandler;
-        server.Settings.PostRequestHandler = _s3SettingsHandler.PostRequestHandler;
-        server.Settings.DefaultRequestHandler = _s3SettingsHandler.DefaultRequestHandler;
+        server.Settings.PreRequestHandler = PreRequestHandler;
+        server.Settings.PostRequestHandler = PostRequestHandler;
+        server.Settings.DefaultRequestHandler = DefaultRequestHandler;
 
-        server.Object.Read = _s3ObjectHandler.Read;
-        server.Object.Write = _s3ObjectHandler.Write;
-        server.Object.Delete = _s3ObjectHandler.Delete;
-        server.Object.ReadTagging = _s3ObjectHandler.ReadTags;
-        server.Object.WriteTagging = _s3ObjectHandler.WriteTags;
-        server.Object.DeleteTagging = _s3ObjectHandler.DeleteTags;
+        server.Object.Read = ObjectRead;
+        server.Object.Write = ObjectWrite;
+        server.Object.Delete = ObjectDelete;
+        server.Object.ReadTagging = ObjectReadTagging;
+        server.Object.WriteTagging = ObjectWriteTagging;
+        server.Object.DeleteTagging = ObjectDeleteTagging;
 
-        server.Object.CreateMultipartUpload = _s3ObjectHandler.CreateMultipartUpload;
-        server.Object.UploadPart = _s3ObjectHandler.UploadPart;
-        server.Object.ReadParts = _s3ObjectHandler.ReadParts;
-        server.Object.CompleteMultipartUpload = _s3ObjectHandler.CompleteMultipartUpload;
-        server.Object.AbortMultipartUpload = _s3ObjectHandler.AbortMultipartUpload;
+        server.Object.CreateMultipartUpload = ObjectCreateMultipartUpload;
+        server.Object.UploadPart = ObjectUploadPart;
+        server.Object.ReadParts = ObjectReadParts;
+        server.Object.CompleteMultipartUpload = ObjectCompleteMultipartUpload;
+        server.Object.AbortMultipartUpload = ObjectAbortMultipartUpload;
 
-        server.Bucket.Write = _s3BucketHandler.Write;
-        server.Bucket.Read = _s3BucketHandler.Read;
-        server.Bucket.Delete = _s3BucketHandler.Delete;
-        server.Bucket.ReadTagging = _s3BucketHandler.ReadTags;
-        server.Bucket.WriteTagging = _s3BucketHandler.WriteTags;
-        server.Bucket.DeleteTagging = _s3BucketHandler.DeleteTags;
-        server.Bucket.Exists = _s3BucketHandler.Exists;
-        server.Bucket.ReadVersions = _s3BucketHandler.ReadVersions;
-        server.Bucket.ReadAcl = _s3BucketHandler.ReadAcl;
+        server.Bucket.Write = BucketWrite;
+        server.Bucket.Read = BucketRead;
+        server.Bucket.Delete = BucketDelete;
+        server.Bucket.ReadTagging = BucketReadTagging;
+        server.Bucket.WriteTagging = BucketWriteTagging;
+        server.Bucket.DeleteTagging = BucketDeleteTagging;
+        server.Bucket.Exists = BucketExists;
+        server.Bucket.ReadVersions = BucketVersions;
+        server.Bucket.ReadAcl = BucketReadAcl;
 
-        server.Service.ListBuckets = _s3BucketHandler.ListBuckets;
+        server.Service.ListBuckets = BucketList;
 
 
         _logger.LogInformation("Starting S3 Server, listening on {Endpoint}", _s3Settings.Webserver.Prefix);
@@ -75,5 +73,150 @@ public class S3Manager {
         else if (str.Contains("warning", StringComparison.OrdinalIgnoreCase)) {
             _logger.LogWarning(str);
         }
+    }
+
+    private async Task<bool> PreRequestHandler(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3SettingsHandler>();
+        return await handler.PreRequestHandler(ctx);
+    }
+
+    private async Task PostRequestHandler(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3SettingsHandler>();
+        await handler.PostRequestHandler(ctx);
+    }
+
+    private async Task DefaultRequestHandler(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3SettingsHandler>();
+        await handler.DefaultRequestHandler(ctx);
+    }
+
+    private async Task<S3Object> ObjectRead(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        return await handler.Read(ctx);
+    }
+
+    private async Task ObjectWrite(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        await handler.Write(ctx);
+    }
+
+    private async Task ObjectDelete(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        await handler.Delete(ctx);
+    }
+
+    private async Task<Tagging> ObjectReadTagging(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        return await handler.ReadTags(ctx);
+    }
+
+    private async Task ObjectWriteTagging(S3Context ctx, Tagging tagging) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        await handler.WriteTags(ctx, tagging);
+    }
+
+    private async Task ObjectDeleteTagging(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        await handler.DeleteTags(ctx);
+    }
+
+    private async Task<InitiateMultipartUploadResult> ObjectCreateMultipartUpload(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        return await handler.CreateMultipartUpload(ctx);
+    }
+
+    private async Task ObjectUploadPart(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        await handler.UploadPart(ctx);
+    }
+
+    private async Task<ListPartsResult> ObjectReadParts(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        return await handler.ReadParts(ctx);
+    }
+
+    private async Task<CompleteMultipartUploadResult> ObjectCompleteMultipartUpload(S3Context ctx,
+        CompleteMultipartUpload upload) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        return await handler.CompleteMultipartUpload(ctx, upload);
+    }
+
+    private async Task ObjectAbortMultipartUpload(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3ObjectHandler>();
+        await handler.AbortMultipartUpload(ctx);
+    }
+
+    private async Task BucketWrite(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        await handler.Write(ctx);
+    }
+
+    private async Task<ListBucketResult> BucketRead(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        return await handler.Read(ctx);
+    }
+
+    private async Task BucketDelete(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        await handler.Delete(ctx);
+    }
+
+    private async Task<Tagging> BucketReadTagging(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        return await handler.ReadTags(ctx);
+    }
+
+    private async Task BucketWriteTagging(S3Context ctx, Tagging tagging) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        await handler.WriteTags(ctx, tagging);
+    }
+
+    private async Task BucketDeleteTagging(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        await handler.DeleteTags(ctx);
+    }
+
+    private async Task<bool> BucketExists(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        return await handler.Exists(ctx);
+    }
+
+    private async Task<ListVersionsResult> BucketVersions(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        return await handler.ReadVersions(ctx);
+    }
+
+    private async Task<AccessControlPolicy> BucketReadAcl(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        return await handler.ReadAcl(ctx);
+    }
+
+    private async Task<ListAllMyBucketsResult> BucketList(S3Context ctx) {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService<IS3BucketHandler>();
+        return await handler.ListBuckets(ctx);
     }
 }

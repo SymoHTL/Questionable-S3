@@ -1,5 +1,4 @@
-﻿using System.Net.Http.Headers;
-using Domain.Common;
+﻿using Domain.Common;
 
 var builder = CoconaApp.CreateBuilder();
 
